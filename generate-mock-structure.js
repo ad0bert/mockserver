@@ -3,6 +3,8 @@ const https = require('https');
 const path = require('path');
 const fs = require('fs');
 
+const demoFile = 'HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\n"data": "hello_world\n}';
+
 function createDirectories(pathname) {
   const __dirname = path.resolve();
   let currPath = path.resolve(__dirname, '');
@@ -21,9 +23,9 @@ function buildDirectoryTree(data) {
     for (let fileName in data.paths[path]) {
       let toWrite = toCreate + '/';
       createDirectories(toWrite);
-      toWrite = __dirname + fileCreate + '/' + fileName.toUpperCase() + '.mock';
+      toWrite = __dirname + '/mocks' + fileCreate + '/' + fileName.toUpperCase() + '.mock';
       if (!fs.existsSync(toWrite)) {
-        fs.writeFile(toWrite, '', function (err) {
+        fs.writeFile(toWrite, demoFile, function (err) {
           if (err) console.log(err);
         });
       }
