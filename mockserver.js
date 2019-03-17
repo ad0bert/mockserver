@@ -24,15 +24,16 @@ const server = http.createServer((req, res) => {
         res.statusCode = parseInt(lines[0].split(/\s+/g)[1]);
         let lineCnt = 1;
         // SET HTTP HEADERS
-        for (let i = 1; i < lines.length && !lines[i].startsWith('{'); ++i) {
-            if (lines[i].trim() === '') continue;
+        for (let i = 1; i < lines.length; ++i) {
+            if (lines[i].trim() === '') break;
             const headerLine = lines[i].split(':');
             res.setHeader(headerLine[0].trim(), headerLine[1].trim());
             lineCnt++;
         }
         // BUILD RESPONSE CONTENT
         for (let i = lineCnt; i < lines.length; ++i) {
-            res.write(lines[i]);
+	    if (lines[i].trim() === '') continue;
+            res.write(lines[i].trim());
         }
     } else {
         res.statusCode = 404;
