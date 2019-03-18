@@ -25,14 +25,14 @@ function buildDirectoryTree(data) {
       createDirectories(toWrite);
       toWrite = __dirname + '/mocks' + fileCreate + '/' + fileName.toUpperCase() + '.mock';
       let response = data.paths[path][fileName]['responses']['200'];
-      let demoFile = demoHeader; 
-      if (response) {
-          let body = createFileBody(data, response['schema']);
+      let demoFile = demoHeader;
+      if (response && response['schema']) {
+        let body = createFileBody(data, response['schema']);
         try {
-	  demoFile += JSON.stringify(JSON.parse(body), null, 4);
-	} catch (e) {
+          demoFile += JSON.stringify(JSON.parse(body), null, 4);
+        } catch (e) {
           demoFile += body;
-	}
+        }
       } else {
         demoFile += JSON.stringify(JSON.parse('{ "auto_generated": true }'), null, 4);
       }
@@ -57,7 +57,7 @@ function createObject(ref, json) {
     return '[' + createObject(ref['items'], json) + ']';
   } else if (ref['type'] == 'string') {
     return '"string"';
-  } else if (ref['type'] == 'integer') {
+  } else if (ref['type'] == 'integer' || ref['type'] == 'number') {
     return '0';
   } else if (ref['type'] == 'boolean') {
     return 'false';
