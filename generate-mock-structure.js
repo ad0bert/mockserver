@@ -3,7 +3,10 @@ const https = require('https');
 const path = require('path');
 const fs = require('fs');
 
-const demoHeader = 'HTTP/1.1 200 OK\nContent-Type: application/json\n\n';
+// const demoHeader = 'HTTP/1.1 200 OK\nContent-Type: application/json\n\n';
+// const demoHeader = 'HTTP/1.1 200 OK\nContent-Type: application/json; charset=utf-8\nAccess-Control-Allow-Origin: *\nAccess-Control-Allow-Headers: Origin, X-Requested-With, Content-Type, Accept, Cache-Control, Pragma, Expires, Authorization, X-Request-ID\nAccess-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT\n\n';
+// TODO generate DEFAULT .header file on mock structure top level
+const demoHeader = '';
 
 function createDirectories(pathname) {
   const __dirname = path.resolve();
@@ -23,7 +26,13 @@ function buildDirectoryTree(data) {
     for (let fileName in data.paths[path]) {
       let toWrite = toCreate + '/';
       createDirectories(toWrite);
-      toWrite = __dirname + '/mocks' + fileCreate + '/' + fileName.toUpperCase() + '.mock';
+      toWrite =
+        __dirname +
+        '/mocks' +
+        fileCreate +
+        '/' +
+        fileName.toUpperCase() +
+        '.json';
       let response = data.paths[path][fileName]['responses']['200'];
       let demoFile = demoHeader;
       if (response && response['schema']) {
@@ -34,10 +43,14 @@ function buildDirectoryTree(data) {
           demoFile += body;
         }
       } else {
-        demoFile += JSON.stringify(JSON.parse('{ "auto_generated": true }'), null, 4);
+        demoFile += JSON.stringify(
+          JSON.parse('{ "auto_generated": true }'),
+          null,
+          4
+        );
       }
       if (!fs.existsSync(toWrite)) {
-        fs.writeFile(toWrite, demoFile, function (err) {
+        fs.writeFile(toWrite, demoFile, function(err) {
           if (err) console.log(err);
         });
       }
@@ -49,17 +62,28 @@ function createObject(ref, json) {
   if (ref['type'] == 'object') {
     let res = '{ ';
     for (let props in ref['properties']) {
-      res += '"' + props + '": ' + createObject(ref['properties'][props], json) + ',';
+      res +=
+        '"' +
+        props +
+        '": ' +
+        createObject(ref['properties'][props], json) +
+        ',';
     }
     res = res.substring(0, res.length - 1);
     return res + ' }';
-  } else if (ref['type'] == 'array') {
+  } else if (ref['type'] === 'array') {
     return '[' + createObject(ref['items'], json) + ']';
-  } else if (ref['type'] == 'string') {
-    return '"string"';
-  } else if (ref['type'] == 'integer' || ref['type'] == 'number') {
+  } else if (ref['type'] === 'string') {
+    if (ref['format'] && ref['format'] === 'date-time') {
+      return '"' + new Date().toISOString() + '"';
+    } else if (ref['format'] && ref['format'] === 'uuid') {
+      return '"6c84fb90-12c4-11e1-840d-7b25c5ee775a"';
+    } else {
+      return '"string"';
+    }
+  } else if (ref['type'] === 'integer' || ref['type'] === 'number') {
     return '0';
-  } else if (ref['type'] == 'boolean') {
+  } else if (ref['type'] === 'boolean') {
     return 'false';
   } else {
     return createObject(getJsonRef(json, ref['$ref']), json);
@@ -72,8 +96,10 @@ function getJsonRef(json, path) {
 }
 
 function createFileBody(json, schema) {
-  if(schema['type'] && schema['type'] == 'array') {
-    return '[' + createObject(getJsonRef(json, schema['items']['$ref']), json) + ']';
+  if (schema['type'] && schema['type'] == 'array') {
+    return (
+      '[' + createObject(getJsonRef(json, schema['items']['$ref']), json) + ']'
+    );
   } else if (schema['type'] && schema['type'] == 'object') {
     if (schema['additionalProperties']['type'] == 'integer') {
       return '{ "additonalProperty1": 0, "additionalProperty2": 0 }';
@@ -89,6 +115,8 @@ function createFileBody(json, schema) {
     return '0';
   } else if (schema['type'] && schema['type'] == 'boolean') {
     return 'false';
+  } else if (schema['type'] && schema['type'] == 'file') {
+    return 'file-not-supported';
   } else {
     return createObject(getJsonRef(json, schema['$ref']), json);
   }
@@ -96,10 +124,10 @@ function createFileBody(json, schema) {
 
 function handleHttpResponse(response) {
   let body = '';
-  response.on('data', function (chunk) {
+  response.on('data', function(chunk) {
     body += chunk;
   });
-  response.on('end', function () {
+  response.on('end', function() {
     buildDirectoryTree(JSON.parse(body));
   });
 }
