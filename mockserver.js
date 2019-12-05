@@ -312,7 +312,6 @@ function buildPathFromUrl(url, type, fileType) {
   if (url.includes('?')) {
     pathParam = '--' + url.split('?')[1];
     url = url.split('?')[0];
-    pathParam = [...pathParam].splice(0, -1).join('');
   }
   if (!url.endsWith('/')) {
     url = url + '/';
