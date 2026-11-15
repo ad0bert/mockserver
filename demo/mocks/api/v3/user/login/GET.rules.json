@@ -1,0 +1,16 @@
+[
+    {
+        "match": { "query": { "username": "user1", "password": "secret" } },
+        "headers": {
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-Rate-Limit": "100",
+            "X-Expires-After": "{{now}}"
+        },
+        "body": "logged in user session:{{uuid}}"
+    },
+    {
+        "status": 400,
+        "headers": { "Content-Type": "text/plain; charset=utf-8" },
+        "body": "Invalid username/password supplied"
+    }
+]

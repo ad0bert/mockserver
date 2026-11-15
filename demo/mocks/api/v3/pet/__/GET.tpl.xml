@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Pet>
+    <id>{{path.3}}</id>
+    <name>doggie</name>
+    <category><id>1</id><name>Dogs</name></category>
+    <photoUrls><photoUrl>https://example.com/photos/{{path.3}}.jpg</photoUrl></photoUrls>
+    <tags><tag><id>1</id><name>friendly</name></tag></tags>
+    <status>available</status>
+</Pet>

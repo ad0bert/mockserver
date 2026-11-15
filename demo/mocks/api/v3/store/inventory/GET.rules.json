@@ -1,0 +1,8 @@
+[
+    {
+        "times": 2,
+        "status": 503,
+        "headers": { "Retry-After": "1" },
+        "body": { "code": 503, "message": "Inventory is being counted, try again" }
+    }
+]

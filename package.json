@@ -22,7 +22,8 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc -p .",
-    "check": "npm run lint && npm run typecheck && npm test"
+    "check": "npm run lint && npm run typecheck && npm test",
+    "demo": "node mockserver.js -m demo/mocks"
   },
   "engines": {
     "node": ">=22"

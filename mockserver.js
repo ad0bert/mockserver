@@ -488,6 +488,8 @@ function createMockServer(options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const log = opts.logger || createLogger(opts.verbose);
 
+  // a recording can start with an empty folder
+  if (opts.record && opts.target && !fs.existsSync(opts.mockDir)) fs.mkdirSync(opts.mockDir, { recursive: true });
   if (!fs.existsSync(opts.mockDir) || !fs.statSync(opts.mockDir).isDirectory()) {
     throw new Error(`Mock directory '${opts.mockDir}' does not exist`);
   }
