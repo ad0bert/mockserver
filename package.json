@@ -12,6 +12,7 @@
   },
   "files": [
     "mockserver.js",
+    "lib/",
     "generate-mock-structure.js"
   ],
   "scripts": {
