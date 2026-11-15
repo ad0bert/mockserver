@@ -13,6 +13,7 @@ const path = require('node:path');
 const rules = require('./lib/rules');
 const proxy = require('./lib/proxy');
 const templates = require('./lib/templates');
+const { safeFileName } = require('./lib/names');
 
 // ----------------------- program defaults -----------------------
 /**
@@ -431,12 +432,15 @@ function resolveMockFile(mockDir, lookup, url, method, kind, accept) {
   if (!parts) return null;
   const { segments, query } = parts;
   const prefixes = [];
-  if (query) prefixes.push(method + QUERY_SEPARATOR + query + '.');
+  if (query) {
+    prefixes.push(method + QUERY_SEPARATOR + safeFileName(query) + '.');
+    prefixes.push(method + QUERY_SEPARATOR + query + '.');
+  }
   prefixes.push(method + '.');
 
   const pickInDir = dir => {
     const files = lookup.list(dir);
-    for (const prefix of prefixes) {
+    for (const prefix of new Set(prefixes)) {
       if (kind === 'header' || kind === 'rules') {
         const name = prefix + SPECIAL_EXT[kind];
         if (files.includes(name)) return path.join(dir, name);
@@ -455,7 +459,7 @@ function resolveMockFile(mockDir, lookup, url, method, kind, accept) {
 
   const search = (dir, i) => {
     if (i === segments.length) return pickInDir(dir);
-    for (const name of new Set([segments[i], WILDCARD])) {
+    for (const name of new Set([safeFileName(segments[i]), segments[i], WILDCARD])) {
       const next = path.join(dir, name);
       if (lookup.isDir(next)) {
         const found = search(next, i + 1);
@@ -732,8 +736,8 @@ function createMockServer(options = {}) {
     }
     const parts = splitUrl(req.url);
     if (!parts) return 0;
-    const dir = path.join(mockDir, ...parts.segments);
-    const baseName = parts.query ? method + QUERY_SEPARATOR + parts.query : method;
+    const dir = path.join(mockDir, ...parts.segments.map(safeFileName));
+    const baseName = parts.query ? method + QUERY_SEPARATOR + safeFileName(parts.query) : method;
     // user defined headers (i.e. a delay from DEFAULT.header) apply anyway, don't copy them into the mock
     const recorded = headers.filter(([n]) => !USER_DEFINED_HEADERS.has(n.toLowerCase()));
     try {
@@ -822,6 +826,7 @@ module.exports = {
   parseHeader,
   resolveMockFile,
   splitUrl,
+  safeFileName,
   chooseBodyFile,
   contentTypeFor,
   DEFAULTS,
