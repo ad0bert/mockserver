@@ -1,31 +1,47 @@
+#!/usr/bin/env node
 /**
+ * Local webserver delivering mock responses for http requests.
+ *
  * @author Peter Ortner
  */
+'use strict';
 
-// imports
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const util = require('util');
+const http = require('node:http');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
 
-// Convert fs.readFile into Promise version of same
-const readFile = util.promisify(fs.readFile);
-const hostname = '127.0.0.1';
+// ----------------------- program defaults -----------------------
+const DEFAULTS = Object.freeze({
+  port: 8181,
+  host: '127.0.0.1',
+  mockDir: path.resolve(__dirname, '../mocks'),
+  verbose: 2,
+  liveCheck: true
+});
 
-// program defaults
-const DEFAULT_PORT = 8181;
-const DEFAULT_LIVE = 'true';
-const DEFAULT_PATH = '../mocks';
-const DEFAULT_VERB = 2;
+const WILDCARD = '__';
+const QUERY_SEPARATOR = '--';
 
-const paramMap = new Map();
-paramMap.set('-p', DEFAULT_PORT);
-paramMap.set('-m', DEFAULT_PATH);
-paramMap.set('-l', DEFAULT_LIVE);
-paramMap.set('-v', DEFAULT_VERB);
+const DEFAULT_OPTIONS_HEADER = [
+  'HTTP/1.1 202 Accepted',
+  'Content-Length: 0',
+  'X-Powered-By: Undertow/1',
+  'Access-Control-Allow-Origin: *',
+  'Access-Control-Allow-Headers: Origin, X-Requested-With, Content-Type, Accept, Cache-Control, Pragma, Expires, Authorization, X-Request-ID',
+  'Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT'
+].join('\n');
+
+const DEFAULT_DEFAULT_HEADER = [
+  'HTTP/1.1 200 OK',
+  'Content-Type: application/json; charset=utf-8',
+  'Access-Control-Allow-Origin: *',
+  'Access-Control-Allow-Headers: Origin, X-Requested-With, Content-Type, Accept, Cache-Control, Pragma, Expires, Authorization, X-Request-ID',
+  'Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT, PATCH'
+].join('\n');
 
 // ----------------------- logging util -----------------------
-const LOG_LVL = {
+const LOG_LVL = Object.freeze({
   DEBUG: 'debug',
   INFO: 'info',
   LOG: 'log',
@@ -33,343 +49,384 @@ const LOG_LVL = {
   WARN: 'warn',
   ERROR: 'error',
   FATAL: 'fatal'
-};
-const logLvlMap = new Map();
-logLvlMap.set(LOG_LVL.LOG, '\x1b[39m');
-logLvlMap.set(LOG_LVL.INFO, '\x1b[34m');
-logLvlMap.set(LOG_LVL.SUCCESS, '\x1b[32m');
-logLvlMap.set(LOG_LVL.DEBUG, '\x1b[32m');
-logLvlMap.set(LOG_LVL.WARN, '\x1b[33m');
-logLvlMap.set(LOG_LVL.ERROR, '\x1b[31m');
-logLvlMap.set(LOG_LVL.FATAL, '\x1b[31m');
+});
 
-function log(type, message) {
-  if (IGNORE_LOG.includes(type)) return;
-  switch (type) {
-    case LOG_LVL.LOG:
-      console.log(logLvlMap.get(type), message);
-      break;
-    case LOG_LVL.INFO:
-      console.info(logLvlMap.get(type), message);
-      break;
-    case LOG_LVL.SUCCESS:
-      console.info(logLvlMap.get(type), message);
-      break;
-    case LOG_LVL.DEBUG:
-      console.debug(logLvlMap.get(type), message);
-      break;
-    case LOG_LVL.WARN:
-      console.warn(logLvlMap.get(type), message);
-      break;
-    case LOG_LVL.ERROR:
-      console.error(logLvlMap.get(type), message);
-      break;
-    case LOG_LVL.FATAL:
-      console.error(logLvlMap.get(type), message);
-      break;
-    default:
-      console.error(logLvlMap.get(LOG_LVL.FATAL), message);
-      break;
-  }
-}
-
-// ----------------------- parse program arguments -----------------------
-
-if (process.argv.length % 2 !== 0) {
-  log(
-    LOG_LVL.LOG,
-    'Usage: ' +
-      __filename +
-      ' -p PORT -m PATH -v VERBOSE(0-4) -l DISABLE LIVE PATH CHECK(true)'
-  );
-  process.exit(-1);
-}
-
-for (let i = 2; i < process.argv.length; i += 2) {
-  if (paramMap.get(process.argv[i]) === undefined) {
-    log(
-      LOG_LVL.LOG,
-      'Usage: ' +
-        __filename +
-        ' -p PORT -m PATH -v VERBOSE(0-4) -l DISABLE LIVE PATH CHECK(true)'
-    );
-    process.exit(-1);
-  } else {
-    paramMap.set(process.argv[i], process.argv[i + 1]);
-  }
-}
-
-const isLiveCheck = paramMap.get('-l') === 'true';
-const port = paramMap.get('-p');
-const MOCK_PATH = fs
-  .realpathSync(__dirname + '/' + paramMap.get('-m'))
-  .replace(/\\/g, '/');
-
-const IGNORE_LOG = [
+// levels that can be silenced, in the order they get enabled by -v (0-5)
+const VERBOSITY_ORDER = [
   LOG_LVL.LOG,
   LOG_LVL.INFO,
   LOG_LVL.SUCCESS,
   LOG_LVL.WARN,
   LOG_LVL.DEBUG
-].slice(paramMap.get('-v'));
+];
 
-// ----------------------- read default files -----------------------
+const COLORS = {
+  [LOG_LVL.LOG]: '\x1b[39m',
+  [LOG_LVL.INFO]: '\x1b[34m',
+  [LOG_LVL.SUCCESS]: '\x1b[32m',
+  [LOG_LVL.DEBUG]: '\x1b[36m',
+  [LOG_LVL.WARN]: '\x1b[33m',
+  [LOG_LVL.ERROR]: '\x1b[31m',
+  [LOG_LVL.FATAL]: '\x1b[31m'
+};
+const COLOR_RESET = '\x1b[0m';
 
-const DEFAULT_OPTIONS_HEADER =
-  'HTTP/1.1 202 Accepted\n' +
-  'Content-Length: 0\n' +
-  'X-Powered-By: Undertow/1\n' +
-  'Access-Control-Allow-Origin: *\n' +
-  'Access-Control-Allow-Headers: Origin, X-Requested-With, Content-Type, Accept, Cache-Control, Pragma, Expires, Authorization, X-Request-ID\n' +
-  'Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT';
-const hasOptionsHeader = fs.existsSync(MOCK_PATH + '/OPTIONS.header');
-if (!hasOptionsHeader) {
-  log(
-    LOG_LVL.LOG,
-    'File: --> ' +
-      MOCK_PATH +
-      '/OPTIONS.header\nis not provided default OPTIONS response is used:\n' +
-      DEFAULT_OPTIONS_HEADER +
-      '\n'
-  );
-}
-const OPTIONS_HEADER = hasOptionsHeader
-  ? fs.readFileSync(MOCK_PATH + '/OPTIONS.header').toString()
-  : DEFAULT_OPTIONS_HEADER;
-
-const DEFAULT_DEFAULT_HEADER =
-  'HTTP/1.1 200 OK\n' +
-  'Content-Type: application/json; charset=utf-8\n' +
-  'Access-Control-Allow-Origin: *\n' +
-  'Access-Control-Allow-Headers: Origin, X-Requested-With, Content-Type, Accept, Cache-Control, Pragma, Expires, Authorization, X-Request-ID\n' +
-  'Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT';
-// 'User-Defined-Delay: 1000';
-const hasDefaultHeader = fs.existsSync(MOCK_PATH + '/DEFAULT.header');
-if (!hasDefaultHeader) {
-  log(
-    LOG_LVL.LOG,
-    'File: --> ' +
-      MOCK_PATH +
-      '/DEFAULT.header\nis not provided default header is used:\n' +
-      DEFAULT_DEFAULT_HEADER +
-      '\n'
-  );
-}
-const DEFAULT_HEADER = hasDefaultHeader
-  ? fs.readFileSync(MOCK_PATH + '/DEFAULT.header').toString()
-  : DEFAULT_DEFAULT_HEADER;
-
-// ----------------------- handle user defined headers ----------------------- //
-
-const userDefinedHeaders = new Map();
-userDefinedHeaders.set('User-Defined-Delay', ms => {
-  return new Promise(resolve => setTimeout(resolve, ms));
-});
-
-// ----------------------- build file list to reduce I/O ----------------------- //
-const MOCK_FILE_PATH_LIST = [];
-
-function walkDir(dir, callback) {
-  fs.readdirSync(dir).forEach(f => {
-    let dirPath = path.join(dir, f);
-    let isDirectory = fs.statSync(dirPath).isDirectory();
-    isDirectory ? walkDir(dirPath, callback) : callback(path.join(dir, f));
-  });
-}
-if (!isLiveCheck) {
-  walkDir(MOCK_PATH, function(filePath) {
-    MOCK_FILE_PATH_LIST.push(filePath.replace(/\\/g, '/'));
-  });
+function createLogger(verbose) {
+  const level = Number.isFinite(verbose) ? verbose : DEFAULTS.verbose;
+  const ignored = new Set(VERBOSITY_ORDER.slice(Math.max(0, level)));
+  return function log(type, message) {
+    if (ignored.has(type)) return;
+    const isError = type === LOG_LVL.ERROR || type === LOG_LVL.FATAL;
+    const stream = isError || type === LOG_LVL.WARN ? process.stderr : process.stdout;
+    const text = stream.isTTY
+      ? `${COLORS[type] || COLORS[LOG_LVL.FATAL]}${message}${COLOR_RESET}`
+      : String(message);
+    stream.write(text + '\n');
+  };
 }
 
-function doesFileExist(file) {
-  if (isLiveCheck) {
-    return fs.existsSync(file);
+// ----------------------- parse program arguments -----------------------
+const USAGE =
+  'Usage: mockserver [-p PORT] [-H HOST] [-m MOCK_DIR] [-v VERBOSE(0-5)] [-l LIVE_CHECK(true|false)]';
+
+/**
+ * parses the command line arguments
+ * @param argv arguments without node binary and script name
+ * @return options object or throws on invalid input
+ */
+function parseArgs(argv) {
+  const options = { ...DEFAULTS };
+  if (argv.length % 2 !== 0) {
+    throw new Error(USAGE);
   }
-  for (let i = 0; i < MOCK_FILE_PATH_LIST.length; ++i) {
-    if (MOCK_FILE_PATH_LIST[i].startsWith(file)) {
-      return true;
+  for (let i = 0; i < argv.length; i += 2) {
+    const value = argv[i + 1];
+    switch (argv[i]) {
+      case '-p': {
+        const port = Number(value);
+        if (!Number.isInteger(port) || port < 0 || port > 65535) {
+          throw new Error(`Invalid port '${value}'\n${USAGE}`);
+        }
+        options.port = port;
+        break;
+      }
+      case '-H':
+        options.host = value;
+        break;
+      case '-m':
+        // relative paths are resolved against the current working directory
+        options.mockDir = path.resolve(value);
+        break;
+      case '-v': {
+        const verbose = Number(value);
+        if (!Number.isInteger(verbose)) {
+          throw new Error(`Invalid verbose level '${value}'\n${USAGE}`);
+        }
+        options.verbose = verbose;
+        break;
+      }
+      case '-l':
+        options.liveCheck = value === 'true';
+        break;
+      default:
+        throw new Error(`Unknown option '${argv[i]}'\n${USAGE}`);
     }
   }
-  return false;
+  return options;
 }
 
-// ----------------------- startup server ----------------------- //
-const server = http.createServer();
-server.maxConnections = 100;
-server.on('request', handleRequest);
-server.listen(port, hostname, () => {
-  log(LOG_LVL.LOG, `Server running at http://${hostname}:${port}/`);
-});
+// ----------------------- header handling -----------------------
 
 /**
- * handle server requests
- * @param req server request
- * @param res server result
+ * parses the content of a .header file
+ * @param content raw http header text (status line + headers)
+ * @return {{statusCode: number, headers: Array<[string, string]>}}
  */
-async function handleRequest(req, res) {
-  // special handling for option calls
-  if (req.method === 'OPTIONS') {
-    return fillHeader(res, OPTIONS_HEADER).then(() => {
-      res.end();
-    });
+function parseHeader(content) {
+  const lines = content.split(/\r?\n/);
+  const statusCode = parseInt((lines[0] || '').trim().split(/\s+/)[1], 10);
+  if (!Number.isInteger(statusCode) || statusCode < 100 || statusCode > 999) {
+    throw new Error(`Invalid status line in header file: '${lines[0]}'`);
   }
-
-  // normal request handling (PUT, GET, POST, ...)
-  log(LOG_LVL.INFO, req.method + ' - HTTP Call for: ' + req.url);
-  const filePath = checkAndFixPath(
-    buildPathFromUrl(req.url, req.method, '.json')
-  );
-  const headerPath = checkAndFixPath(
-    buildPathFromUrl(req.url, req.method, '.header')
-  );
-  return getFileContent(headerPath)
-    .then(header => {
-      const fileContent = header ? header.toString() : DEFAULT_HEADER;
-      return fillHeader(res, fileContent).then(() => {
-        return getFileContent(filePath).then(resource => {
-          if (resource) {
-            res.write(resource.toString());
-          } else {
-            log(
-              LOG_LVL.ERROR,
-              'NOT FOUND: ' + buildPathFromUrl(req.url, req.method, '.json')
-            );
-            res.statusCode = 404;
-          }
-        });
-      });
-    })
-    .catch(ex => {
-      log(LOG_LVL.FATAL, 'Error: ' + ex.toString());
-      res.statusCode = 500;
-      res.write(ex.toString());
-    })
-    .finally(() => {
-      res.end();
-    });
-}
-
-/**
- * fills the server response with header information
- * @param res server response
- * @param headerContent header information + custom headers
- */
-async function fillHeader(res, headerContent) {
-  const lines = headerContent.split(/\r?\n/g);
-  // SET HTTP STATUS
-  res.statusCode = parseInt(lines[0].split(/\s+/g)[1]);
-  // SET HTTP HEADERS
+  const headers = [];
   for (let i = 1; i < lines.length; ++i) {
-    if (lines[i].trim() === '') break;
-    const headerLine = lines[i].split(':');
-    if (userDefinedHeaders.get(headerLine[0])) {
-      await userDefinedHeaders.get(headerLine[0])(headerLine[1]);
+    const line = lines[i];
+    if (line.trim() === '') break;
+    const idx = line.indexOf(':');
+    if (idx <= 0) continue; // ignore malformed lines
+    // only split on the first colon, values like URLs or dates contain colons
+    headers.push([line.slice(0, idx).trim(), line.slice(idx + 1).trim()]);
+  }
+  return { statusCode, headers };
+}
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+const USER_DEFINED_HEADERS = new Map([
+  [
+    'user-defined-delay',
+    async value => {
+      const ms = parseInt(value, 10);
+      if (ms > 0) await delay(ms);
+    }
+  ]
+]);
+
+/**
+ * applies the header information to the server response
+ * @param res server response
+ * @param parsed result of parseHeader
+ */
+async function applyHeader(res, parsed) {
+  res.statusCode = parsed.statusCode;
+  const collected = new Map();
+  for (const [name, value] of parsed.headers) {
+    const userDefined = USER_DEFINED_HEADERS.get(name.toLowerCase());
+    if (userDefined) {
+      await userDefined(value);
+      continue;
+    }
+    // repeated headers (i.e. Set-Cookie) are sent multiple times
+    const key = name.toLowerCase();
+    if (collected.has(key)) {
+      collected.get(key).values.push(value);
     } else {
-      res.setHeader(headerLine[0].trim(), headerLine[1].trim());
+      collected.set(key, { name, values: [value] });
     }
   }
+  for (const { name, values } of collected.values()) {
+    res.setHeader(name, values.length === 1 ? values[0] : values);
+  }
 }
 
+// ----------------------- file lookup -----------------------
+
 /**
- * try to open the given resource.
- * @param filePath resource to pen
- * @return file content or null when nothing is found
+ * builds a lookup function for files and directories below the mock root
+ * @param mockDir mock root
+ * @param liveCheck true: check the filesystem on every request, false: index once at startup
  */
-async function getFileContent(filePath) {
-  return (await filePath) ? readFile(filePath) : null;
+function createFileLookup(mockDir, liveCheck) {
+  if (liveCheck) {
+    return p => fs.existsSync(p);
+  }
+  const known = new Set([mockDir]);
+  const walk = dir => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      known.add(full);
+      if (entry.isDirectory()) walk(full);
+    }
+  };
+  walk(mockDir);
+  return p => known.has(p);
 }
 
 /**
- * checks if the given path is available if not try to resolve wildcards
- * @param filePath to check
- * @return resolved file path
+ * splits a request url into safe, decoded path segments and the raw query.
+ * @return {{segments: string[], query: string} | null} null if the path is not allowed
  */
-function checkAndFixPath(filePath) {
-  let result = filePath;
-  if (!doesFileExist(result)) {
-    log(LOG_LVL.WARN, 'NOT FOUND: ' + result);
-    log(LOG_LVL.WARN, '    --> check for wildcards ...');
-    result = resolveWildcards(filePath);
+function splitUrl(url) {
+  const qIdx = url.indexOf('?');
+  const rawPath = qIdx >= 0 ? url.slice(0, qIdx) : url;
+  // slashes in a query would otherwise create sub directories
+  const query = qIdx >= 0 ? url.slice(qIdx + 1).replace(/[/\\]/g, encodeURIComponent) : '';
+  const segments = [];
+  for (const raw of rawPath.split('/')) {
+    if (raw === '') continue;
+    let segment;
+    try {
+      segment = decodeURIComponent(raw);
+    } catch {
+      return null;
+    }
+    // prevent path traversal outside of the mock root
+    if (
+      segment === '.' ||
+      segment === '..' ||
+      /[/\\\0]/.test(segment)
+    ) {
+      return null;
+    }
+    segments.push(segment);
   }
-  if (result) {
-    log(LOG_LVL.SUCCESS, 'FILE FOUND: ' + result);
-  }
-  return result;
+  if (query.includes('\0')) return null;
+  return { segments, query };
 }
 
 /**
- * creates the corresponding filesystem path to the requested resource.
- * if the given request type is OPTIONS the corresponding resource must be located top level in the mock file structure
- *
- * @param url request url
- * @param type request type (i.e. GET, POST, PUT, DELETE, OPTIONS)
- * @param fileType file ending (i.e. '.json', '.headers'
- * @return path to the requested resource
- */
-function buildPathFromUrl(url, type, fileType) {
-  let pathParam = '';
-  if (url.includes('?')) {
-    pathParam = '--' + url.split('?')[1];
-    url = url.split('?')[0];
-  }
-  if (!url.endsWith('/')) {
-    url = url + '/';
-  }
-  return MOCK_PATH + url + type + pathParam + fileType;
-}
-
-/**
- * check the whole path from left to right to find where a folder is missing
- * then replace the missing folder with the wildcard '__'. This is redone until
- * the searched file is found in the wildcard directory.
+ * resolves the mock file for a request. Each path segment is matched literally first,
+ * if that does not lead to a file the wildcard folder '__' is tried (with backtracking).
+ * In the final folder the query specific file (METHOD--query.ext) is preferred over METHOD.ext.
  *
  * example:
  *   Filesystem:
  *   - TEST
  *       |- 00
  *       |   |- GET.json
- *       |
- *       |- 01
- *       |   |- GET.json
- *       |
  *       |- __
  *           |- GET.json
  *
- *   File requested /TEST/ABCD/GET.json
- *   Folder 02 is not available
- *   Replace 02 with __
- *   New Path is /TEST/__/GET.json
+ *   /TEST/00   -> /TEST/00/GET.json
+ *   /TEST/ABCD -> /TEST/__/GET.json
  *
- * @param filePath to resolve
- * @return new file path or null if no matching file is found
+ * @return absolute file path or null when nothing matches
  */
-function resolveWildcards(filePath) {
-  const fileType = '.' + filePath.split('.').pop();
-  const filePathParts = filePath.replace(MOCK_PATH, '').split('/');
-  let currPathToCheck = MOCK_PATH + filePathParts[0];
-  for (let i = 1; i < filePathParts.length - 1; ++i) {
-    const checkNext = currPathToCheck + '/' + filePathParts[i];
-    if (doesFileExist(checkNext)) {
-      currPathToCheck = checkNext;
-    } else {
-      currPathToCheck += '/__';
-      if (!doesFileExist(currPathToCheck)) {
-        return null;
+function resolveMockFile(mockDir, exists, url, method, ext) {
+  const parts = splitUrl(url);
+  if (!parts) return null;
+  const { segments, query } = parts;
+  const candidates = [];
+  if (query) candidates.push(method + QUERY_SEPARATOR + query + ext);
+  candidates.push(method + ext);
+
+  const search = (dir, i) => {
+    if (i === segments.length) {
+      for (const name of candidates) {
+        const file = path.join(dir, name);
+        if (exists(file)) return file;
+      }
+      return null;
+    }
+    for (const name of new Set([segments[i], WILDCARD])) {
+      const next = path.join(dir, name);
+      if (exists(next)) {
+        const found = search(next, i + 1);
+        if (found) return found;
       }
     }
-  }
-  let fileName = filePathParts[filePathParts.length - 1];
-  if (filePathParts[filePathParts.length - 1].includes('--')) {
-    fileName =
-      filePathParts[filePathParts.length - 1].substring(
-        0,
-        fileName.indexOf('--')
-      ) + fileType;
-  }
-  const result = currPathToCheck + '/' + fileName;
-  if (!doesFileExist(result)) {
     return null;
-  }
-  return result;
+  };
+  return search(mockDir, 0);
 }
+
+// ----------------------- server -----------------------
+
+function readOptionalFile(file) {
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+}
+
+/**
+ * creates (but does not start) the mock server
+ * @param options see DEFAULTS
+ * @return http.Server
+ */
+function createMockServer(options = {}) {
+  const opts = { ...DEFAULTS, ...options };
+  const log = opts.logger || createLogger(opts.verbose);
+
+  if (!fs.existsSync(opts.mockDir) || !fs.statSync(opts.mockDir).isDirectory()) {
+    throw new Error(`Mock directory '${opts.mockDir}' does not exist`);
+  }
+  const mockDir = fs.realpathSync(opts.mockDir);
+
+  const optionsHeaderFile = path.join(mockDir, 'OPTIONS.header');
+  const optionsHeaderContent = readOptionalFile(optionsHeaderFile);
+  if (optionsHeaderContent === null) {
+    log(LOG_LVL.LOG, `File: --> ${optionsHeaderFile}\nis not provided, default OPTIONS response is used:\n${DEFAULT_OPTIONS_HEADER}\n`);
+  }
+  const OPTIONS_HEADER = parseHeader(optionsHeaderContent ?? DEFAULT_OPTIONS_HEADER);
+
+  const defaultHeaderFile = path.join(mockDir, 'DEFAULT.header');
+  const defaultHeaderContent = readOptionalFile(defaultHeaderFile);
+  if (defaultHeaderContent === null) {
+    log(LOG_LVL.LOG, `File: --> ${defaultHeaderFile}\nis not provided, default header is used:\n${DEFAULT_DEFAULT_HEADER}\n`);
+  }
+  const DEFAULT_HEADER = parseHeader(defaultHeaderContent ?? DEFAULT_DEFAULT_HEADER);
+
+  const exists = createFileLookup(mockDir, opts.liveCheck);
+  const resolve = (url, method, ext) => {
+    const file = resolveMockFile(mockDir, exists, url, method, ext);
+    if (file) log(LOG_LVL.SUCCESS, 'FILE FOUND: ' + file);
+    return file;
+  };
+
+  async function handleRequest(req, res) {
+    log(LOG_LVL.INFO, `${req.method} - HTTP Call for: ${req.url}`);
+    const method = req.method.toUpperCase();
+
+    // special handling for option calls (CORS preflight)
+    if (method === 'OPTIONS') {
+      const headerFile = resolve(req.url, method, '.header');
+      const header = headerFile ? parseHeader(await fsp.readFile(headerFile, 'utf8')) : OPTIONS_HEADER;
+      await applyHeader(res, header);
+      return res.end();
+    }
+
+    const headerFile = resolve(req.url, method, '.header');
+    const bodyFile = resolve(req.url, method, '.json');
+    const [headerContent, body] = await Promise.all([
+      headerFile ? fsp.readFile(headerFile, 'utf8') : null,
+      bodyFile ? fsp.readFile(bodyFile) : null
+    ]);
+
+    if (!body && !headerFile) {
+      log(LOG_LVL.ERROR, `NOT FOUND: ${method} ${req.url}`);
+      await applyHeader(res, DEFAULT_HEADER);
+      res.statusCode = 404;
+      return res.end();
+    }
+
+    // a .header file without a .json body is a valid mock (i.e. 204 No Content, redirects)
+    await applyHeader(res, headerContent !== null ? parseHeader(headerContent) : DEFAULT_HEADER);
+    if (method === 'HEAD' || !body) return res.end();
+    res.end(body);
+  }
+
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res).catch(err => {
+      log(LOG_LVL.FATAL, 'Error: ' + (err && err.stack ? err.stack : err));
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      }
+      res.end(String(err));
+    });
+  });
+  server.maxConnections = 100;
+  return server;
+}
+
+// ----------------------- CLI -----------------------
+function main(argv) {
+  let options;
+  try {
+    options = parseArgs(argv);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  const log = createLogger(options.verbose);
+  let server;
+  try {
+    server = createMockServer({ ...options, logger: log });
+  } catch (e) {
+    log(LOG_LVL.FATAL, e.message);
+    process.exit(1);
+  }
+  server.on('error', err => {
+    log(LOG_LVL.FATAL, `Server error: ${err.message}`);
+    process.exit(1);
+  });
+  server.listen(options.port, options.host, () => {
+    const { port } = server.address();
+    log(LOG_LVL.LOG, `Server running at http://${options.host}:${port}/ serving ${options.mockDir}`);
+  });
+  const shutdown = () => server.close(() => process.exit(0));
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+if (require.main === module) {
+  main(process.argv.slice(2));
+}
+
+module.exports = {
+  createMockServer,
+  parseArgs,
+  parseHeader,
+  resolveMockFile,
+  splitUrl,
+  DEFAULTS,
+  LOG_LVL
+};

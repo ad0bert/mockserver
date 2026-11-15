@@ -1,0 +1,25 @@
+{
+  "name": "mockserver",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Local webserver delivering file based mock responses for http requests, with a Swagger / OpenAPI mock generator",
+  "author": "Peter Ortner",
+  "license": "UNLICENSED",
+  "main": "mockserver.js",
+  "bin": {
+    "mockserver": "mockserver.js",
+    "generate-mock-structure": "generate-mock-structure.js"
+  },
+  "files": [
+    "mockserver.js",
+    "generate-mock-structure.js"
+  ],
+  "scripts": {
+    "start": "node mockserver.js",
+    "generate": "node generate-mock-structure.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
