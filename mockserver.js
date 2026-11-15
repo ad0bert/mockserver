@@ -26,6 +26,7 @@ const { safeFileName } = require('./lib/names');
  * @property {boolean} liveCheck check the filesystem on every request instead of using an index
  * @property {boolean} watch reload on changes in the mock folder
  * @property {number} watchDelay ms to wait for more changes before reloading
+ * @property {number} startupReloadDelay ms after the start for one extra reload (changes a starting watcher missed)
  * @property {string | null} target backend for requests without a mock
  * @property {boolean} record write proxied responses as mock files
  * @property {number} proxyTimeout ms
@@ -41,6 +42,7 @@ const DEFAULTS = Object.freeze({
   liveCheck: true,
   watch: true,
   watchDelay: 100,
+  startupReloadDelay: 1000,
   target: null, // backend for requests without a mock
   record: false, // write proxied responses as mock files
   proxyTimeout: 30000
@@ -528,17 +530,23 @@ function createMockServer(options = {}) {
 
   // pick up added / changed / removed mocks without a restart
   let watcher = null;
+  let startupReload = null;
   if (opts.watch) {
     let timer = null;
+    const reload = reason => {
+      lookup.rebuild();
+      loadRootHeaders();
+      log(LOG_LVL.DEBUG, `${reason}, reloaded`);
+    };
     const onChange = () => {
       clearTimeout(timer);
       // editors and generators write many files at once, rebuild once they are done
-      timer = setTimeout(() => {
-        lookup.rebuild();
-        loadRootHeaders();
-        log(LOG_LVL.DEBUG, 'mock directory changed, reloaded');
-      }, opts.watchDelay);
+      timer = setTimeout(() => reload('mock directory changed'), opts.watchDelay);
     };
+    // some watchers start asynchronously (FSEvents on macOS) and miss changes made in their first
+    // moments, so reload once more shortly after the start
+    startupReload = setTimeout(() => reload('startup check'), opts.startupReloadDelay);
+    startupReload.unref();
     try {
       // the live check only needs to know about DEFAULT.header / OPTIONS.header in the root
       watcher = fs.watch(mockDir, { recursive: !opts.liveCheck }, onChange);
@@ -826,7 +834,10 @@ function createMockServer(options = {}) {
     });
   });
   server.maxConnections = 100;
-  server.on('close', () => watcher && watcher.close());
+  server.on('close', () => {
+    clearTimeout(startupReload);
+    if (watcher) watcher.close();
+  });
   return server;
 }
 

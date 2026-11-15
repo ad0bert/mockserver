@@ -18,14 +18,17 @@ async function start(root, options) {
   return { server, base: `http://127.0.0.1:${server.address().port}` };
 }
 
-// polls until the server reflects a filesystem change (watch events are async)
-async function eventually(fn, timeout = 3000) {
+// polls until the server reflects a filesystem change (watch events are async).
+// retry repeats the change now and then: a watcher that is still starting (FSEvents on macOS)
+// can miss the first event, the test must not depend on that
+async function eventually(fn, retry = () => {}, timeout = 5000) {
   const end = Date.now() + timeout;
-  for (;;) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await fn();
     } catch (e) {
       if (Date.now() > end) throw e;
+      if (attempt % 8 === 0) retry();
       await new Promise(r => setTimeout(r, 25));
     }
   }
@@ -117,21 +120,48 @@ test('DEFAULT.header content type is kept for .json', async t => {
 test('watch: index mode picks up added, changed and removed mocks', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocks-'));
   write(root, 'a/GET.json', '{"v":1}');
-  const { server, base } = await start(root, { liveCheck: false, watch: true });
+  // no startup reload: the changes below have to come through the watcher
+  const { server, base } = await start(root, { liveCheck: false, watch: true, startupReloadDelay: 60000 });
   t.after(() => server.close());
 
   assert.equal((await fetch(base + '/new/deep')).status, 404);
-  write(root, 'new/deep/GET.json', '{"added":true}');
-  await eventually(async () => assert.deepEqual(await (await fetch(base + '/new/deep')).json(), { added: true }));
+  const add = () => write(root, 'new/deep/GET.json', '{"added":true}');
+  add();
+  await eventually(async () => assert.deepEqual(await (await fetch(base + '/new/deep')).json(), { added: true }), add);
 
-  write(root, 'a/GET.xml', '<a/>');
+  const change = () => write(root, 'a/GET.xml', '<a/>');
+  change();
   await eventually(async () => {
     const res = await fetch(base + '/a', { headers: { accept: 'application/xml' } });
     assert.equal(await res.text(), '<a/>');
-  });
+  }, change);
 
+  const remove = () => {
+    write(root, 'new/deep/GET.json', '{"added":true}');
+    fs.rmSync(path.join(root, 'new'), { recursive: true, force: true });
+  };
   fs.rmSync(path.join(root, 'new'), { recursive: true });
-  await eventually(async () => assert.equal((await fetch(base + '/new/deep')).status, 404));
+  await eventually(async () => assert.equal((await fetch(base + '/new/deep')).status, 404), remove);
+});
+
+test('watch: one extra reload shortly after the start', async t => {
+  // covers changes a watcher misses while it is still starting (FSEvents on macOS); that can't be
+  // provoked reliably in a test, so check that the reload runs and the server keeps answering
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocks-'));
+  write(root, 'a/GET.json', '{"ok":true}');
+  const lines = [];
+  const server = createMockServer({
+    mockDir: root,
+    liveCheck: false,
+    watch: true,
+    startupReloadDelay: 50,
+    logger: (_type, message) => lines.push(message)
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  await eventually(async () => assert.ok(lines.includes('startup check, reloaded')));
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/a`);
+  assert.deepEqual(await res.json(), { ok: true });
 });
 
 test('watch: DEFAULT.header is reloaded, a broken one keeps the previous', async t => {
@@ -140,8 +170,9 @@ test('watch: DEFAULT.header is reloaded, a broken one keeps the previous', async
   const { server, base } = await start(root, { watch: true });
   t.after(() => server.close());
 
-  write(root, 'DEFAULT.header', 'HTTP/1.1 200 OK\nX-Version: 2\n');
-  await eventually(async () => assert.equal((await fetch(base + '/a')).headers.get('x-version'), '2'));
+  const update = () => write(root, 'DEFAULT.header', 'HTTP/1.1 200 OK\nX-Version: 2\n');
+  update();
+  await eventually(async () => assert.equal((await fetch(base + '/a')).headers.get('x-version'), '2'), update);
 
   write(root, 'DEFAULT.header', 'not a status line');
   await new Promise(r => setTimeout(r, 150));

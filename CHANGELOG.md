@@ -15,6 +15,11 @@ All notable changes to this project are listed here. The format follows
 
 - When installed from npm, the generator suggests `npx mockserver` to start the server.
 
+### Fixed
+
+- Watching: changes made in the first moments after the start could be missed on macOS, where the folder watcher
+  starts asynchronously. The server now reloads once more about a second after the start.
+
 ## [1.0.0] - 2026-11-15
 
 First release. Compared with the original scripts:
