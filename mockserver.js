@@ -515,7 +515,7 @@ function createMockServer(options = {}) {
   const lookup = createFileLookup(mockDir, opts.liveCheck);
   const resolve = (req, method, kind) => {
     const file = resolveMockFile(mockDir, lookup, req.url, method, kind, req.headers.accept);
-    if (file) log(LOG_LVL.SUCCESS, 'FILE FOUND: ' + file);
+    if (file) log(LOG_LVL.DEBUG, 'FILE FOUND: ' + file);
     return file;
   };
 
@@ -542,14 +542,21 @@ function createMockServer(options = {}) {
     }
   }
 
-  async function handleRequest(req, res) {
-    log(LOG_LVL.INFO, `${req.method} - HTTP Call for: ${req.url}`);
+  // mock root relative path for the request log
+  const rel = file => path.relative(mockDir, file).split(path.sep).join('/');
+
+  /**
+   * @param trace collects what answered the request, logged once the response is sent
+   */
+  async function handleRequest(req, res, trace) {
+    log(LOG_LVL.DEBUG, `${req.method} - HTTP Call for: ${req.url}`);
     const method = req.method.toUpperCase();
 
     // special handling for option calls (CORS preflight)
     if (method === 'OPTIONS') {
       const headerFile = resolve(req, method, 'header');
       const header = headerFile ? parseHeader(await fsp.readFile(headerFile, 'utf8')) : OPTIONS_HEADER;
+      trace.source = headerFile ? rel(headerFile) : 'default OPTIONS header';
       await applyHeader(res, header);
       return res.end();
     }
@@ -574,10 +581,10 @@ function createMockServer(options = {}) {
       const info = rules.requestInfo(req, await getRequestBody());
       const index = list.findIndex(rule => rules.ruleMatches(rule, info));
       if (index >= 0) {
-        log(LOG_LVL.SUCCESS, `RULE MATCHED: #${index} in ${found.rulesFile}`);
+        trace.source = `rule #${index} in ${rel(found.rulesFile)}`;
         return sendRule(res, method, list[index], path.dirname(found.rulesFile));
       }
-      log(LOG_LVL.INFO, `no rule matched in ${found.rulesFile}, using the mock files`);
+      log(LOG_LVL.DEBUG, `no rule matched in ${found.rulesFile}, using the mock files`);
     }
 
     const { headerFile, bodyFile } = found;
@@ -588,14 +595,16 @@ function createMockServer(options = {}) {
 
     if (body === null && !headerFile) {
       // paths rejected by splitUrl (i.e. '..') are not forwarded either
-      if (opts.target && splitUrl(req.url)) return proxyRequest(req, res, method, await getRequestBody());
-      log(LOG_LVL.ERROR, `NOT FOUND: ${method} ${req.url}`);
+      if (opts.target && splitUrl(req.url)) return proxyRequest(req, res, method, await getRequestBody(), trace);
+      trace.source = 'no mock found';
+      trace.failed = true;
       await applyHeader(res, DEFAULT_HEADER);
       res.statusCode = 404;
       return res.end();
     }
 
     // a .header file without a body is a valid mock (i.e. 204 No Content, redirects)
+    trace.source = rel(bodyFile || headerFile);
     const header = headerContent !== null ? parseHeader(headerContent) : DEFAULT_HEADER;
     await applyHeader(res, header);
     if (body === null) return res.end();
@@ -662,33 +671,41 @@ function createMockServer(options = {}) {
   /**
    * forwards a request without a mock to the proxy target, optionally records the answer
    */
-  async function proxyRequest(req, res, method, body) {
+  async function proxyRequest(req, res, method, body, trace) {
     let upstream;
     try {
       upstream = await proxy.forward({ target: opts.target, req, method, body, timeout: opts.proxyTimeout });
     } catch (e) {
       const reason = (e.cause && e.cause.message) || e.message;
-      log(LOG_LVL.ERROR, `PROXY FAILED: ${method} ${req.url} -> ${opts.target}: ${reason}`);
+      trace.source = `proxy to ${opts.target} failed: ${reason}`;
+      trace.failed = true;
       res.statusCode = 502;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       return res.end(`Proxy to ${opts.target} failed: ${reason}`);
     }
-    log(LOG_LVL.INFO, `PROXIED: ${method} ${req.url} -> ${upstream.status}`);
+    trace.source = `proxy ${opts.target}`;
     const headers = proxy.withDefaults(upstream.headers, DEFAULT_HEADER.headers);
+    // record first, so the files exist when the client sends its next request
+    if (opts.record && method !== 'HEAD') {
+      const count = recordResponse(req, method, upstream.status, headers, upstream.body);
+      if (count) trace.source += `, recorded ${count} file(s)`;
+    }
     await applyHeader(res, { statusCode: upstream.status, headers });
     if (method === 'HEAD') return res.end();
     res.setHeader('Content-Length', upstream.body.length);
     res.end(upstream.body);
-    if (opts.record) recordResponse(req, method, upstream.status, headers, upstream.body);
   }
 
+  /**
+   * @return number of written files
+   */
   function recordResponse(req, method, status, headers, body) {
     if (status >= 500) {
       log(LOG_LVL.WARN, `NOT RECORDED: ${method} ${req.url} answered ${status}`);
-      return;
+      return 0;
     }
     const parts = splitUrl(req.url);
-    if (!parts) return;
+    if (!parts) return 0;
     const dir = path.join(mockDir, ...parts.segments);
     const baseName = parts.query ? method + QUERY_SEPARATOR + parts.query : method;
     // user defined headers (i.e. a delay from DEFAULT.header) apply anyway, don't copy them into the mock
@@ -697,8 +714,10 @@ function createMockServer(options = {}) {
       const written = proxy.record({ dir, baseName, status, headers: recorded, body, mimeTypes: MIME_TYPES });
       written.forEach(f => log(LOG_LVL.SUCCESS, 'RECORDED: ' + f));
       if (written.length) lookup.rebuild();
+      return written.length;
     } catch (e) {
       log(LOG_LVL.ERROR, `Recording ${method} ${req.url} failed: ${e.message}`);
+      return 0;
     }
   }
 
@@ -707,8 +726,20 @@ function createMockServer(options = {}) {
   }
 
   const server = http.createServer((req, res) => {
-    handleRequest(req, res).catch(err => {
+    const start = process.hrtime.bigint();
+    const trace = { source: '', failed: false };
+    // one line per request: method, url, status, duration and what answered it
+    res.on('close', () => {
+      const ms = Number(process.hrtime.bigint() - start) / 1e6;
+      const status = res.writableFinished ? res.statusCode : 'aborted';
+      const line =
+        `${req.method} ${req.url} ${status} ${ms.toFixed(1)}ms` + (trace.source ? ` <- ${trace.source}` : '');
+      log(trace.failed ? LOG_LVL.ERROR : LOG_LVL.INFO, line);
+    });
+    handleRequest(req, res, trace).catch(err => {
       const status = (err && err.statusCode) || 500;
+      trace.source = `error: ${err && err.message}`;
+      trace.failed = true;
       log(
         status >= 500 ? LOG_LVL.FATAL : LOG_LVL.ERROR,
         'Error: ' + (status >= 500 && err && err.stack ? err.stack : err)
