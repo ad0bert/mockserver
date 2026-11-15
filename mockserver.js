@@ -36,7 +36,7 @@ const { safeFileName } = require('./lib/names');
 const DEFAULTS = Object.freeze({
   port: 8181,
   host: '127.0.0.1',
-  mockDir: path.resolve(__dirname, '../mocks'),
+  mockDir: path.resolve('mocks'), // ./mocks in the current directory, like the generator
   verbose: 2,
   liveCheck: true,
   watch: true,
@@ -55,7 +55,6 @@ const SPECIAL_EXTS = new Set(Object.values(SPECIAL_EXT));
 const DEFAULT_OPTIONS_HEADER = [
   'HTTP/1.1 202 Accepted',
   'Content-Length: 0',
-  'X-Powered-By: Undertow/1',
   'Access-Control-Allow-Origin: *',
   'Access-Control-Allow-Headers: Origin, X-Requested-With, Content-Type, Accept, Cache-Control, Pragma, Expires, Authorization, X-Request-ID',
   'Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT'

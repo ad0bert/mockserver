@@ -1,6 +1,6 @@
 {
   "name": "mockserver",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Local webserver delivering file based mock responses for http requests, with a Swagger / OpenAPI mock generator",
   "author": "Peter Ortner",
