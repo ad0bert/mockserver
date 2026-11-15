@@ -4,7 +4,7 @@
   "private": true,
   "description": "Local webserver delivering file based mock responses for http requests, with a Swagger / OpenAPI mock generator",
   "author": "Peter Ortner",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "main": "mockserver.js",
   "bin": {
     "mockserver": "mockserver.js",

@@ -278,3 +278,9 @@ user@local:~$ npm run check     # all of the above
 ```
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE). The Petstore spec in [`demo/petstore`](demo/petstore) is from
+[swagger-api/swagger-petstore](https://github.com/swagger-api/swagger-petstore) and is licensed under the
+[Apache License 2.0](demo/petstore/LICENSE).

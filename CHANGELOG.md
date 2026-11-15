@@ -25,6 +25,7 @@ First release. Compared with the original scripts:
 - `-H` option for the interface to listen on.
 - **Generator**: OpenAPI 3 and YAML specs, `example` / `enum` / `allOf` values, `.header` files for statuses other than
   `200`, example requests (`METHOD.request.json`), `--overwrite`, and an optional output folder.
+- MIT license.
 - Swagger Petstore demo (`npm run demo`), Dockerfile, tests, ESLint, Prettier, type checking and CI on Linux, Windows and macOS.
 
 ### Changed
