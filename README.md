@@ -97,6 +97,31 @@ Response fields:
 
 An invalid rules file answers with a `500` that names the problem.
 
+### Placeholders (templates)
+
+Body files with `.tpl.` before the extension are templates: `GET.tpl.json`, `POST.tpl.html`, ... Their placeholders
+are filled for each request. The type still comes from the last extension, so `GET.tpl.json` is sent as JSON.
+Files without `.tpl.` are sent unchanged. In rules, the inline `body` and the `headers` values always support placeholders.
+
+```
+{ "id": "{{path.1}}", "page": {{query.page | 1}}, "createdBy": "{{headers.x-user | anonymous}}", "at": "{{now}}" }
+```
+
+| Placeholder                       | Value                                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------- |
+| `{{path}}`, `{{path.N}}`          | the request path, or its segment N (starting at 0: `/users/42` → `{{path.1}}` is `42`) |
+| `{{query.name}}`                  | a query parameter                                                                      |
+| `{{headers.name}}`                | a request header (any case)                                                            |
+| `{{body}}`, `{{body.a.b}}`        | the JSON or form body, or a value in it (`{{body.items.0}}` for array elements)        |
+| `{{method}}`, `{{url}}`           | the request method and full url                                                        |
+| `{{now}}`, `{{timestamp}}`        | the current time as ISO date, or as ms since 1970                                      |
+| `{{uuid}}`, `{{randomInt 1 100}}` | a random UUID, or a random whole number between the two values                         |
+| `{{query.page \| 1}}`             | a default, used when the value is missing or empty                                     |
+
+Values are escaped for the file type, so they can't break the file. In `.json` they're escaped as JSON string content,
+so `"name": "{{body.name}}"` stays valid whatever the name is. Without quotes, numbers stay numbers and objects are
+written as JSON. In `.html`, `.xml` and `.svg` they're HTML escaped. Header values have line breaks removed.
+
 ### Proxy and record
 
 ```console

@@ -12,6 +12,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const rules = require('./lib/rules');
 const proxy = require('./lib/proxy');
+const templates = require('./lib/templates');
 
 // ----------------------- program defaults -----------------------
 /**
@@ -575,23 +576,43 @@ function createMockServer(options = {}) {
     // the request body is only read when rules or the proxy need it
     let requestBody = null;
     const getRequestBody = async () => (requestBody ??= await rules.readRequestBody(req));
+    // request data for rules and templates
+    let info = null;
+    const getRequestInfo = async () => {
+      if (!info) {
+        const parts = splitUrl(req.url);
+        info = {
+          ...rules.requestInfo(req, await getRequestBody()),
+          method,
+          url: req.url,
+          segments: parts ? parts.segments : []
+        };
+      }
+      return info;
+    };
 
     if (found.rulesFile) {
       const list = rules.parseRules(await fsp.readFile(found.rulesFile, 'utf8'), found.rulesFile);
-      const info = rules.requestInfo(req, await getRequestBody());
-      const index = list.findIndex(rule => rules.ruleMatches(rule, info));
+      const request = await getRequestInfo();
+      const index = list.findIndex(rule => rules.ruleMatches(rule, request));
       if (index >= 0) {
         trace.source = `rule #${index} in ${rel(found.rulesFile)}`;
-        return sendRule(res, method, list[index], path.dirname(found.rulesFile));
+        return sendRule(res, method, list[index], path.dirname(found.rulesFile), request);
       }
       log(LOG_LVL.DEBUG, `no rule matched in ${found.rulesFile}, using the mock files`);
     }
 
     const { headerFile, bodyFile } = found;
-    const [headerContent, body] = await Promise.all([
+    const [headerContent, fileContent] = await Promise.all([
       headerFile ? fsp.readFile(headerFile, 'utf8') : null,
       bodyFile ? fsp.readFile(bodyFile) : null
     ]);
+    const body =
+      fileContent && templates.isTemplateFile(bodyFile)
+        ? Buffer.from(
+            templates.render(fileContent.toString('utf8'), await getRequestInfo(), templates.escapingFor(bodyFile))
+          )
+        : fileContent;
 
     if (body === null && !headerFile) {
       // paths rejected by splitUrl (i.e. '..') are not forwarded either
@@ -623,11 +644,12 @@ function createMockServer(options = {}) {
   /**
    * answers a request with a matched rule (see lib/rules.js)
    * @param dir folder of the rules file, "file" is resolved against it
+   * @param request request data for the placeholders in headers and body
    */
-  async function sendRule(res, method, rule, dir) {
+  async function sendRule(res, method, rule, dir, request) {
     if (rule.delay > 0) await delay(rule.delay);
     const extra = Object.entries(rule.headers || {}).flatMap(([name, value]) =>
-      (Array.isArray(value) ? value : [value]).map(v => [name, String(v)])
+      (Array.isArray(value) ? value : [value]).map(v => [name, templates.render(String(v), request, 'header')])
     );
     const ruleNames = new Set(extra.map(([n]) => n.toLowerCase()));
     const header = {
@@ -644,12 +666,16 @@ function createMockServer(options = {}) {
         throw new Error(`Rule file '${rule.file}' is outside of the mock directory`);
       }
       body = await fsp.readFile(file);
+      if (templates.isTemplateFile(file)) {
+        body = Buffer.from(templates.render(body.toString('utf8'), request, templates.escapingFor(file)));
+      }
       type = contentTypeFor(file);
     } else if (rule.body !== undefined) {
       if (typeof rule.body === 'string') {
-        body = Buffer.from(rule.body); // sent as is, with the DEFAULT.header content type
+        // sent with the DEFAULT.header content type
+        body = Buffer.from(templates.render(rule.body, request, 'raw'));
       } else {
-        body = Buffer.from(JSON.stringify(rule.body, null, 4));
+        body = Buffer.from(templates.render(JSON.stringify(rule.body, null, 4), request, 'json'));
         type = contentTypeFor('x.json');
       }
     }
