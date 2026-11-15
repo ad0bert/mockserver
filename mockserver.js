@@ -10,6 +10,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const rules = require('./lib/rules');
+const proxy = require('./lib/proxy');
 
 // ----------------------- program defaults -----------------------
 const DEFAULTS = Object.freeze({
@@ -19,11 +21,17 @@ const DEFAULTS = Object.freeze({
   verbose: 2,
   liveCheck: true,
   watch: true,
-  watchDelay: 100
+  watchDelay: 100,
+  target: null, // backend for requests without a mock
+  record: false, // write proxied responses as mock files
+  proxyTimeout: 30000
 });
 
 const WILDCARD = '__';
 const QUERY_SEPARATOR = '--';
+// files next to the body files that are never served as a body
+const SPECIAL_EXT = { header: 'header', rules: 'rules.json' };
+const SPECIAL_EXTS = new Set(Object.values(SPECIAL_EXT));
 
 const DEFAULT_OPTIONS_HEADER = [
   'HTTP/1.1 202 Accepted',
@@ -89,7 +97,8 @@ function createLogger(verbose) {
 
 // ----------------------- parse program arguments -----------------------
 const USAGE =
-  'Usage: mockserver [-p PORT] [-H HOST] [-m MOCK_DIR] [-v VERBOSE(0-5)] [-l LIVE_CHECK(true|false)] [-w WATCH(true|false)]';
+  'Usage: mockserver [-p PORT] [-H HOST] [-m MOCK_DIR] [-v VERBOSE(0-5)] [-l LIVE_CHECK(true|false)] [-w WATCH(true|false)]\n' +
+  '                  [-t PROXY_TARGET_URL] [-r RECORD(true|false)]';
 
 /**
  * parses the command line arguments
@@ -132,6 +141,22 @@ function parseArgs(argv) {
         break;
       case '-w':
         options.watch = value === 'true';
+        break;
+      case '-t': {
+        let url;
+        try {
+          url = new URL(value);
+        } catch {
+          url = null;
+        }
+        if (!url || !/^https?:$/.test(url.protocol)) {
+          throw new Error(`Invalid proxy target '${value}', expected an http(s) URL\n${USAGE}`);
+        }
+        options.target = value;
+        break;
+      }
+      case '-r':
+        options.record = value === 'true';
         break;
       default:
         throw new Error(`Unknown option '${argv[i]}'\n${USAGE}`);
@@ -391,7 +416,7 @@ function splitUrl(url) {
  * Body files can have any extension (GET.json, GET.xml, GET.png, ...), see chooseBodyFile.
  *
  * @param lookup see createFileLookup
- * @param kind 'header' for the .header file, 'body' for the response body
+ * @param kind 'header' for the .header file, 'rules' for the .rules.json file, 'body' for the response body
  * @param accept the request's Accept header (only used for kind 'body')
  * @return absolute file path or null when nothing matches
  */
@@ -406,15 +431,16 @@ function resolveMockFile(mockDir, lookup, url, method, kind, accept) {
   const pickInDir = dir => {
     const files = lookup.list(dir);
     for (const prefix of prefixes) {
-      if (kind === 'header') {
-        if (files.includes(prefix + 'header')) return path.join(dir, prefix + 'header');
+      if (kind === 'header' || kind === 'rules') {
+        const name = prefix + SPECIAL_EXT[kind];
+        if (files.includes(name)) return path.join(dir, name);
         continue;
       }
       const bodies = files.filter(name => {
         if (!name.startsWith(prefix)) return false;
         const ext = name.slice(prefix.length);
-        // skip header files and editor leftovers (GET.json~, GET.json.swp)
-        return ext !== '' && ext !== 'header' && !ext.endsWith('~') && !ext.endsWith('.swp');
+        // skip header / rules files and editor leftovers (GET.json~, GET.json.swp)
+        return ext !== '' && !SPECIAL_EXTS.has(ext) && !ext.endsWith('~') && !ext.endsWith('.swp');
       });
       if (bodies.length) return path.join(dir, chooseBodyFile(bodies.sort(), accept));
     }
@@ -522,19 +548,41 @@ function createMockServer(options = {}) {
       return res.end();
     }
 
-    let headerFile = resolve(req, method, 'header');
-    let bodyFile = resolve(req, method, 'body');
+    const find = m => ({
+      rulesFile: resolve(req, m, 'rules'),
+      headerFile: resolve(req, m, 'header'),
+      bodyFile: resolve(req, m, 'body')
+    });
+    let found = find(method);
     // HEAD answers like GET without a body, unless HEAD mocks exist
-    if (method === 'HEAD' && !headerFile && !bodyFile) {
-      headerFile = resolve(req, 'GET', 'header');
-      bodyFile = resolve(req, 'GET', 'body');
+    if (method === 'HEAD' && !found.rulesFile && !found.headerFile && !found.bodyFile) {
+      found = find('GET');
     }
+
+    // the request body is only read when rules or the proxy need it
+    let requestBody = null;
+    const getRequestBody = async () => (requestBody ??= await rules.readRequestBody(req));
+
+    if (found.rulesFile) {
+      const list = rules.parseRules(await fsp.readFile(found.rulesFile, 'utf8'), found.rulesFile);
+      const info = rules.requestInfo(req, await getRequestBody());
+      const index = list.findIndex(rule => rules.ruleMatches(rule, info));
+      if (index >= 0) {
+        log(LOG_LVL.SUCCESS, `RULE MATCHED: #${index} in ${found.rulesFile}`);
+        return sendRule(res, method, list[index], path.dirname(found.rulesFile));
+      }
+      log(LOG_LVL.INFO, `no rule matched in ${found.rulesFile}, using the mock files`);
+    }
+
+    const { headerFile, bodyFile } = found;
     const [headerContent, body] = await Promise.all([
       headerFile ? fsp.readFile(headerFile, 'utf8') : null,
       bodyFile ? fsp.readFile(bodyFile) : null
     ]);
 
     if (body === null && !headerFile) {
+      // paths rejected by splitUrl (i.e. '..') are not forwarded either
+      if (opts.target && splitUrl(req.url)) return proxyRequest(req, res, method, await getRequestBody());
       log(LOG_LVL.ERROR, `NOT FOUND: ${method} ${req.url}`);
       await applyHeader(res, DEFAULT_HEADER);
       res.statusCode = 404;
@@ -557,11 +605,103 @@ function createMockServer(options = {}) {
     res.end(body);
   }
 
+  /**
+   * answers a request with a matched rule (see lib/rules.js)
+   * @param dir folder of the rules file, "file" is resolved against it
+   */
+  async function sendRule(res, method, rule, dir) {
+    if (rule.delay > 0) await delay(rule.delay);
+    const extra = Object.entries(rule.headers || {}).flatMap(([name, value]) =>
+      (Array.isArray(value) ? value : [value]).map(v => [name, String(v)])
+    );
+    const ruleNames = new Set(extra.map(([n]) => n.toLowerCase()));
+    const header = {
+      statusCode: rule.status || 200,
+      headers: [...DEFAULT_HEADER.headers.filter(([n]) => !ruleNames.has(n.toLowerCase())), ...extra]
+    };
+
+    let body = null;
+    let type = null;
+    if (rule.file !== undefined) {
+      const file = path.resolve(dir, rule.file);
+      const rel = path.relative(mockDir, file);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        throw new Error(`Rule file '${rule.file}' is outside of the mock directory`);
+      }
+      body = await fsp.readFile(file);
+      type = contentTypeFor(file);
+    } else if (rule.body !== undefined) {
+      if (typeof rule.body === 'string') {
+        body = Buffer.from(rule.body); // sent as is, with the DEFAULT.header content type
+      } else {
+        body = Buffer.from(JSON.stringify(rule.body, null, 4));
+        type = contentTypeFor('x.json');
+      }
+    }
+
+    await applyHeader(res, header);
+    if (body === null) return res.end();
+    // same precedence as for mock files: rule headers, then DEFAULT.header for JSON, then the extension
+    if (type && !ruleNames.has('content-type') && (!type.startsWith('application/json') || !res.hasHeader('content-type'))) {
+      res.setHeader('Content-Type', type);
+    }
+    res.setHeader('Content-Length', body.length);
+    res.end(method === 'HEAD' ? undefined : body);
+  }
+
+  /**
+   * forwards a request without a mock to the proxy target, optionally records the answer
+   */
+  async function proxyRequest(req, res, method, body) {
+    let upstream;
+    try {
+      upstream = await proxy.forward({ target: opts.target, req, method, body, timeout: opts.proxyTimeout });
+    } catch (e) {
+      const reason = (e.cause && e.cause.message) || e.message;
+      log(LOG_LVL.ERROR, `PROXY FAILED: ${method} ${req.url} -> ${opts.target}: ${reason}`);
+      res.statusCode = 502;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.end(`Proxy to ${opts.target} failed: ${reason}`);
+    }
+    log(LOG_LVL.INFO, `PROXIED: ${method} ${req.url} -> ${upstream.status}`);
+    const headers = proxy.withDefaults(upstream.headers, DEFAULT_HEADER.headers);
+    await applyHeader(res, { statusCode: upstream.status, headers });
+    if (method === 'HEAD') return res.end();
+    res.setHeader('Content-Length', upstream.body.length);
+    res.end(upstream.body);
+    if (opts.record) recordResponse(req, method, upstream.status, headers, upstream.body);
+  }
+
+  function recordResponse(req, method, status, headers, body) {
+    if (status >= 500) {
+      log(LOG_LVL.WARN, `NOT RECORDED: ${method} ${req.url} answered ${status}`);
+      return;
+    }
+    const parts = splitUrl(req.url);
+    if (!parts) return;
+    const dir = path.join(mockDir, ...parts.segments);
+    const baseName = parts.query ? method + QUERY_SEPARATOR + parts.query : method;
+    // user defined headers (i.e. a delay from DEFAULT.header) apply anyway, don't copy them into the mock
+    const recorded = headers.filter(([n]) => !USER_DEFINED_HEADERS.has(n.toLowerCase()));
+    try {
+      const written = proxy.record({ dir, baseName, status, headers: recorded, body, mimeTypes: MIME_TYPES });
+      written.forEach(f => log(LOG_LVL.SUCCESS, 'RECORDED: ' + f));
+      if (written.length) lookup.rebuild();
+    } catch (e) {
+      log(LOG_LVL.ERROR, `Recording ${method} ${req.url} failed: ${e.message}`);
+    }
+  }
+
+  if (opts.record && !opts.target) {
+    log(LOG_LVL.WARN, 'Recording (-r) needs a proxy target (-t), nothing will be recorded');
+  }
+
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch(err => {
-      log(LOG_LVL.FATAL, 'Error: ' + (err && err.stack ? err.stack : err));
+      const status = (err && err.statusCode) || 500;
+      log(status >= 500 ? LOG_LVL.FATAL : LOG_LVL.ERROR, 'Error: ' + (status >= 500 && err && err.stack ? err.stack : err));
       if (!res.headersSent) {
-        res.statusCode = 500;
+        res.statusCode = status;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       }
       res.end(String(err));
