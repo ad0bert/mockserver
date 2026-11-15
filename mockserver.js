@@ -17,7 +17,9 @@ const DEFAULTS = Object.freeze({
   host: '127.0.0.1',
   mockDir: path.resolve(__dirname, '../mocks'),
   verbose: 2,
-  liveCheck: true
+  liveCheck: true,
+  watch: true,
+  watchDelay: 100
 });
 
 const WILDCARD = '__';
@@ -87,7 +89,7 @@ function createLogger(verbose) {
 
 // ----------------------- parse program arguments -----------------------
 const USAGE =
-  'Usage: mockserver [-p PORT] [-H HOST] [-m MOCK_DIR] [-v VERBOSE(0-5)] [-l LIVE_CHECK(true|false)]';
+  'Usage: mockserver [-p PORT] [-H HOST] [-m MOCK_DIR] [-v VERBOSE(0-5)] [-l LIVE_CHECK(true|false)] [-w WATCH(true|false)]';
 
 /**
  * parses the command line arguments
@@ -127,6 +129,9 @@ function parseArgs(argv) {
       }
       case '-l':
         options.liveCheck = value === 'true';
+        break;
+      case '-w':
+        options.watch = value === 'true';
         break;
       default:
         throw new Error(`Unknown option '${argv[i]}'\n${USAGE}`);
@@ -202,24 +207,137 @@ async function applyHeader(res, parsed) {
 // ----------------------- file lookup -----------------------
 
 /**
- * builds a lookup function for files and directories below the mock root
+ * builds the lookup for files and directories below the mock root
  * @param mockDir mock root
- * @param liveCheck true: check the filesystem on every request, false: index once at startup
+ * @param liveCheck true: check the filesystem on every request, false: use an index (see rebuild)
+ * @return {{isDir(p: string): boolean, list(dir: string): string[], rebuild(): void}}
+ *   list returns the names of the files (not directories) in dir
  */
 function createFileLookup(mockDir, liveCheck) {
   if (liveCheck) {
-    return p => fs.existsSync(p);
+    return {
+      isDir: p => {
+        try {
+          return fs.statSync(p).isDirectory();
+        } catch {
+          return false;
+        }
+      },
+      list: dir => {
+        try {
+          return fs
+            .readdirSync(dir, { withFileTypes: true })
+            .filter(e => !e.isDirectory())
+            .map(e => e.name);
+        } catch {
+          return [];
+        }
+      },
+      rebuild() {}
+    };
   }
-  const known = new Set([mockDir]);
-  const walk = dir => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      known.add(full);
-      if (entry.isDirectory()) walk(full);
-    }
+  // directory -> file names
+  let index = new Map();
+  const build = () => {
+    const next = new Map();
+    const walk = dir => {
+      const files = [];
+      next.set(dir, files);
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return; // removed while indexing
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) walk(path.join(dir, entry.name));
+        else files.push(entry.name);
+      }
+    };
+    walk(mockDir);
+    index = next; // swap at once, requests never see a half built index
   };
-  walk(mockDir);
-  return p => known.has(p);
+  build();
+  return {
+    isDir: p => index.has(p),
+    list: dir => index.get(dir) || [],
+    rebuild: build
+  };
+}
+
+// ----------------------- content types -----------------------
+const MIME_TYPES = {
+  json: 'application/json',
+  xml: 'application/xml',
+  html: 'text/html',
+  htm: 'text/html',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  js: 'text/javascript',
+  mjs: 'text/javascript',
+  css: 'text/css',
+  md: 'text/markdown',
+  yaml: 'application/yaml',
+  yml: 'application/yaml',
+  svg: 'image/svg+xml',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  ico: 'image/x-icon',
+  pdf: 'application/pdf',
+  zip: 'application/zip',
+  gz: 'application/gzip',
+  wasm: 'application/wasm',
+  woff: 'font/woff',
+  woff2: 'font/woff2',
+  mp3: 'audio/mpeg',
+  mp4: 'video/mp4',
+  webm: 'video/webm'
+};
+const TEXT_MIME = /^text\/|^application\/(json|xml|yaml|javascript)|\+xml$|\+json$/;
+
+function extensionOf(file) {
+  const base = path.basename(file);
+  const idx = base.lastIndexOf('.');
+  return idx >= 0 ? base.slice(idx + 1).toLowerCase() : '';
+}
+
+/**
+ * @return content type for the file name, including charset for text types
+ */
+function contentTypeFor(file) {
+  const mime = MIME_TYPES[extensionOf(file)] || 'application/octet-stream';
+  return TEXT_MIME.test(mime) ? `${mime}; charset=utf-8` : mime;
+}
+
+/**
+ * picks the body file when several exist (i.e. GET.json and GET.xml).
+ * The request's Accept header decides, otherwise .json wins, otherwise the first by name.
+ */
+function chooseBodyFile(names, accept) {
+  if (names.length > 1 && accept) {
+    const accepted = accept
+      .split(',')
+      .map(part => {
+        const [type, ...params] = part.trim().toLowerCase().split(';');
+        const q = params.map(p => p.trim()).find(p => p.startsWith('q='));
+        return { type: type.trim(), q: q ? Number(q.slice(2)) : 1 };
+      })
+      .filter(a => a.type && a.type !== '*/*' && a.q > 0)
+      .sort((a, b) => b.q - a.q); // stable, keeps the client's order for equal q
+    for (const { type } of accepted) {
+      const match = names.find(name => {
+        const mime = MIME_TYPES[extensionOf(name)];
+        if (!mime) return false;
+        return type.endsWith('/*') ? mime.startsWith(type.slice(0, -1)) : mime === type;
+      });
+      if (match) return match;
+    }
+  }
+  return names.find(n => extensionOf(n) === 'json') || names[0];
 }
 
 /**
@@ -270,27 +388,44 @@ function splitUrl(url) {
  *   /TEST/00   -> /TEST/00/GET.json
  *   /TEST/ABCD -> /TEST/__/GET.json
  *
+ * Body files can have any extension (GET.json, GET.xml, GET.png, ...), see chooseBodyFile.
+ *
+ * @param lookup see createFileLookup
+ * @param kind 'header' for the .header file, 'body' for the response body
+ * @param accept the request's Accept header (only used for kind 'body')
  * @return absolute file path or null when nothing matches
  */
-function resolveMockFile(mockDir, exists, url, method, ext) {
+function resolveMockFile(mockDir, lookup, url, method, kind, accept) {
   const parts = splitUrl(url);
   if (!parts) return null;
   const { segments, query } = parts;
-  const candidates = [];
-  if (query) candidates.push(method + QUERY_SEPARATOR + query + ext);
-  candidates.push(method + ext);
+  const prefixes = [];
+  if (query) prefixes.push(method + QUERY_SEPARATOR + query + '.');
+  prefixes.push(method + '.');
+
+  const pickInDir = dir => {
+    const files = lookup.list(dir);
+    for (const prefix of prefixes) {
+      if (kind === 'header') {
+        if (files.includes(prefix + 'header')) return path.join(dir, prefix + 'header');
+        continue;
+      }
+      const bodies = files.filter(name => {
+        if (!name.startsWith(prefix)) return false;
+        const ext = name.slice(prefix.length);
+        // skip header files and editor leftovers (GET.json~, GET.json.swp)
+        return ext !== '' && ext !== 'header' && !ext.endsWith('~') && !ext.endsWith('.swp');
+      });
+      if (bodies.length) return path.join(dir, chooseBodyFile(bodies.sort(), accept));
+    }
+    return null;
+  };
 
   const search = (dir, i) => {
-    if (i === segments.length) {
-      for (const name of candidates) {
-        const file = path.join(dir, name);
-        if (exists(file)) return file;
-      }
-      return null;
-    }
+    if (i === segments.length) return pickInDir(dir);
     for (const name of new Set([segments[i], WILDCARD])) {
       const next = path.join(dir, name);
-      if (exists(next)) {
+      if (lookup.isDir(next)) {
         const found = search(next, i + 1);
         if (found) return found;
       }
@@ -321,25 +456,59 @@ function createMockServer(options = {}) {
   const mockDir = fs.realpathSync(opts.mockDir);
 
   const optionsHeaderFile = path.join(mockDir, 'OPTIONS.header');
-  const optionsHeaderContent = readOptionalFile(optionsHeaderFile);
-  if (optionsHeaderContent === null) {
-    log(LOG_LVL.LOG, `File: --> ${optionsHeaderFile}\nis not provided, default OPTIONS response is used:\n${DEFAULT_OPTIONS_HEADER}\n`);
-  }
-  const OPTIONS_HEADER = parseHeader(optionsHeaderContent ?? DEFAULT_OPTIONS_HEADER);
-
   const defaultHeaderFile = path.join(mockDir, 'DEFAULT.header');
-  const defaultHeaderContent = readOptionalFile(defaultHeaderFile);
-  if (defaultHeaderContent === null) {
-    log(LOG_LVL.LOG, `File: --> ${defaultHeaderFile}\nis not provided, default header is used:\n${DEFAULT_DEFAULT_HEADER}\n`);
-  }
-  const DEFAULT_HEADER = parseHeader(defaultHeaderContent ?? DEFAULT_DEFAULT_HEADER);
+  let OPTIONS_HEADER;
+  let DEFAULT_HEADER;
+  // a broken header file while editing must not kill the server, keep the previous one
+  const loadRootHeader = (file, fallback, label, previous) => {
+    const content = readOptionalFile(file);
+    if (content === null) {
+      if (!previous) log(LOG_LVL.LOG, `File: --> ${file}\nis not provided, default ${label} is used:\n${fallback}\n`);
+      return parseHeader(fallback);
+    }
+    try {
+      return parseHeader(content);
+    } catch (e) {
+      if (!previous) throw e;
+      log(LOG_LVL.ERROR, `${e.message} (${file}), keeping the previous version`);
+      return previous;
+    }
+  };
+  const loadRootHeaders = () => {
+    OPTIONS_HEADER = loadRootHeader(optionsHeaderFile, DEFAULT_OPTIONS_HEADER, 'OPTIONS response', OPTIONS_HEADER);
+    DEFAULT_HEADER = loadRootHeader(defaultHeaderFile, DEFAULT_DEFAULT_HEADER, 'header', DEFAULT_HEADER);
+  };
+  loadRootHeaders();
 
-  const exists = createFileLookup(mockDir, opts.liveCheck);
-  const resolve = (url, method, ext) => {
-    const file = resolveMockFile(mockDir, exists, url, method, ext);
+  const lookup = createFileLookup(mockDir, opts.liveCheck);
+  const resolve = (req, method, kind) => {
+    const file = resolveMockFile(mockDir, lookup, req.url, method, kind, req.headers.accept);
     if (file) log(LOG_LVL.SUCCESS, 'FILE FOUND: ' + file);
     return file;
   };
+
+  // pick up added / changed / removed mocks without a restart
+  let watcher = null;
+  if (opts.watch) {
+    let timer = null;
+    const onChange = () => {
+      clearTimeout(timer);
+      // editors and generators write many files at once, rebuild once they are done
+      timer = setTimeout(() => {
+        lookup.rebuild();
+        loadRootHeaders();
+        log(LOG_LVL.DEBUG, 'mock directory changed, reloaded');
+      }, opts.watchDelay);
+    };
+    try {
+      // the live check only needs to know about DEFAULT.header / OPTIONS.header in the root
+      watcher = fs.watch(mockDir, { recursive: !opts.liveCheck }, onChange);
+      watcher.on('error', e => log(LOG_LVL.WARN, `Watching ${mockDir} failed: ${e.message}`));
+      watcher.unref();
+    } catch (e) {
+      log(LOG_LVL.WARN, `Watching ${mockDir} is not supported (${e.message}), restart to pick up changes`);
+    }
+  }
 
   async function handleRequest(req, res) {
     log(LOG_LVL.INFO, `${req.method} - HTTP Call for: ${req.url}`);
@@ -347,29 +516,44 @@ function createMockServer(options = {}) {
 
     // special handling for option calls (CORS preflight)
     if (method === 'OPTIONS') {
-      const headerFile = resolve(req.url, method, '.header');
+      const headerFile = resolve(req, method, 'header');
       const header = headerFile ? parseHeader(await fsp.readFile(headerFile, 'utf8')) : OPTIONS_HEADER;
       await applyHeader(res, header);
       return res.end();
     }
 
-    const headerFile = resolve(req.url, method, '.header');
-    const bodyFile = resolve(req.url, method, '.json');
+    let headerFile = resolve(req, method, 'header');
+    let bodyFile = resolve(req, method, 'body');
+    // HEAD answers like GET without a body, unless HEAD mocks exist
+    if (method === 'HEAD' && !headerFile && !bodyFile) {
+      headerFile = resolve(req, 'GET', 'header');
+      bodyFile = resolve(req, 'GET', 'body');
+    }
     const [headerContent, body] = await Promise.all([
       headerFile ? fsp.readFile(headerFile, 'utf8') : null,
       bodyFile ? fsp.readFile(bodyFile) : null
     ]);
 
-    if (!body && !headerFile) {
+    if (body === null && !headerFile) {
       log(LOG_LVL.ERROR, `NOT FOUND: ${method} ${req.url}`);
       await applyHeader(res, DEFAULT_HEADER);
       res.statusCode = 404;
       return res.end();
     }
 
-    // a .header file without a .json body is a valid mock (i.e. 204 No Content, redirects)
-    await applyHeader(res, headerContent !== null ? parseHeader(headerContent) : DEFAULT_HEADER);
-    if (method === 'HEAD' || !body) return res.end();
+    // a .header file without a body is a valid mock (i.e. 204 No Content, redirects)
+    const header = headerContent !== null ? parseHeader(headerContent) : DEFAULT_HEADER;
+    await applyHeader(res, header);
+    if (body === null) return res.end();
+
+    // Content-Type: the resource's own .header file wins, then the file extension.
+    // .json keeps the DEFAULT.header type, so custom types like application/hal+json still work.
+    const ownType = headerContent !== null && header.headers.some(([n]) => n.toLowerCase() === 'content-type');
+    if (!ownType && (extensionOf(bodyFile) !== 'json' || !res.hasHeader('content-type'))) {
+      res.setHeader('Content-Type', contentTypeFor(bodyFile));
+    }
+    if (!res.hasHeader('content-length')) res.setHeader('Content-Length', body.length);
+    if (method === 'HEAD') return res.end();
     res.end(body);
   }
 
@@ -384,6 +568,7 @@ function createMockServer(options = {}) {
     });
   });
   server.maxConnections = 100;
+  server.on('close', () => watcher && watcher.close());
   return server;
 }
 
@@ -427,6 +612,8 @@ module.exports = {
   parseHeader,
   resolveMockFile,
   splitUrl,
+  chooseBodyFile,
+  contentTypeFor,
   DEFAULTS,
   LOG_LVL
 };

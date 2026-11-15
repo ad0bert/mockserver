@@ -33,6 +33,18 @@ Requires **Node.js 22 or newer**. There are no runtime dependencies.
 }
 ~~~~
 
+### Other response types
+
+The body file can have any extension, not just `.json`: `GET.xml`, `GET.html`, `GET.csv`, `GET.png`, `GET.pdf`, ...
+The `Content-Type` comes from the extension (unknown extensions are sent as `application/octet-stream`),
+and binary files are sent unchanged. A `Content-Type` in the resource's own `.header` file always wins.
+For `.json` the type from `DEFAULT.header` is kept, so custom types such as `application/hal+json` still work.
+
+If a folder has several body files for the same method (for example `GET.json` and `GET.xml`), the request's
+`Accept` header picks one (`Accept: application/xml` returns `GET.xml`). Without a match `.json` is used.
+
+`HEAD` requests use the `GET` mock (headers only) unless `HEAD` files exist.
+
 ### Headers
 
 You can also add an http `$HTTP_METHOD.header` file in the same folder as the resource, for example:
@@ -77,7 +89,7 @@ Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT
 ## Usage
 
 ```console
-user@local:~$ node mockserver.js -p port -H host -m mockdir -v verbose -l livecheck
+user@local:~$ node mockserver.js -p port -H host -m mockdir -v verbose -l livecheck -w watch
 ```
  - `-p` port: the port used (default 8181)
  - `-H` host: the interface to bind to (default `127.0.0.1`; use `0.0.0.0` inside Docker)
@@ -85,7 +97,10 @@ user@local:~$ node mockserver.js -p port -H host -m mockdir -v verbose -l livech
    Default: `../mocks` relative to `mockserver.js`.
  - `-v` verbose: log level 0-5 (default 2). Errors are always logged; each level adds log, info, success, warn, debug.
  - `-l` livecheck: `true` (default) checks the filesystem on every request. `false` indexes the mock folder once at startup,
-   so files added later are not picked up until a restart.
+   which is faster for large mock folders. Changes are picked up automatically while `-w` is on.
+ - `-w` watch: `true` (default) watches the mock folder, so added, changed or removed mocks and edits to
+   `DEFAULT.header` / `OPTIONS.header` apply without a restart. If an edited root header file is invalid,
+   the previous version is kept and an error is logged. `false` disables watching.
 
 Call `http://localhost:port/$REQUEST-PATH/` and the matching `$HTTP_METHOD` file is served.
 
