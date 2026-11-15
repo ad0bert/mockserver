@@ -4,21 +4,25 @@ This package provides a local webserver delivering mock responses for http reque
 The basic idea of the node package [Mockserver](https://www.npmjs.com/package/mockserver) was used.
 Defining mocks works mostly the way described for the mockserver package.
 
-Requires **Node.js 22 or newer**. There are no runtime dependencies.
+Requires **Node.js 22 or newer**. The server has no runtime dependencies; the generator needs `npm install` for YAML support.
 
 ## Howto
 
 - Create a file `$REQUEST-PATH/$HTTP_METHOD.json` under the mock root.
-- It is also possible to auto generate a full mock folder from a Swagger 2.0 or OpenAPI 3.x (JSON) spec:
+- It is also possible to auto generate a full mock folder from a Swagger 2.0 or OpenAPI 3.x spec, in JSON or YAML:
   ```console
-  user@local:~$ node generate-mock-structure.js ./swagger.json [outDir]
+  user@local:~$ npm install
+  user@local:~$ node generate-mock-structure.js ./openapi.yaml [outDir]
   or
   user@local:~$ node generate-mock-structure.js https://swagger.server.com/swagger.json [outDir]
   ```
-  `outDir` defaults to `./mocks` in the current directory. Existing files are never overwritten.
+  `outDir` defaults to `./mocks` in the current directory. Existing files are kept unless you pass `--overwrite`
+  (for example after the spec changed): `node generate-mock-structure.js --overwrite ./openapi.yaml`.
   Path parameters (`{id}`) become wildcard folders (`__`). For each operation the `200` response is used
   (otherwise the first `2xx`, otherwise `default`). If that status is not `200`, a matching `.header` file is
   written as well (for example `HTTP/1.1 201 Created`). Spec `example`, `default` and `enum` values are used where present.
+  For operations that take a request body, an example request is written to `$HTTP_METHOD.request.json`.
+  It's only there for reference (for example as a starting point for a rules file), the server never sends it.
 - The file contains the desired response, for example:
 
 ```
@@ -212,5 +216,9 @@ Call `http://localhost:port/$REQUEST-PATH/` and the matching `$HTTP_METHOD` file
 ## Development
 
 ```console
-user@local:~$ npm test
+user@local:~$ npm install
+user@local:~$ npm test          # tests
+user@local:~$ npm run lint      # ESLint + Prettier check (npm run format fixes formatting)
+user@local:~$ npm run typecheck # JSDoc type check with TypeScript
+user@local:~$ npm run check     # all of the above
 ```

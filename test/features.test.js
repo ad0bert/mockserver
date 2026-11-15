@@ -166,3 +166,11 @@ test('chooseBodyFile / contentTypeFor', () => {
   assert.equal(contentTypeFor('x/GET.SVG'), 'image/svg+xml; charset=utf-8');
   assert.equal(contentTypeFor('GET.pdf'), 'application/pdf');
 });
+
+test('.request.json files are never served', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocks-'));
+  write(root, 'a/POST.request.json', '{"example":"request"}');
+  const { server, base } = await start(root, { watch: false });
+  t.after(() => server.close());
+  assert.equal((await fetch(base + '/a', { method: 'POST' })).status, 404);
+});

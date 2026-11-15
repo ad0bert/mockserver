@@ -47,7 +47,7 @@ const DEFAULTS = Object.freeze({
 const WILDCARD = '__';
 const QUERY_SEPARATOR = '--';
 // files next to the body files that are never served as a body
-const SPECIAL_EXT = { header: 'header', rules: 'rules.json' };
+const SPECIAL_EXT = { header: 'header', rules: 'rules.json', request: 'request.json' };
 const SPECIAL_EXTS = new Set(Object.values(SPECIAL_EXT));
 
 const DEFAULT_OPTIONS_HEADER = [

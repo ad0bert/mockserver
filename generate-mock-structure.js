@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * Generates a mock folder structure for mockserver.js from a Swagger 2.0 or OpenAPI 3.x (JSON) spec.
+ * Generates a mock folder structure for mockserver.js from a Swagger 2.0 or OpenAPI 3.x spec (JSON or YAML).
  *
- * Usage: generate-mock-structure <spec file | http(s) url> [output dir (default ./mocks)]
+ * Usage: generate-mock-structure [--overwrite] <spec file | http(s) url> [output dir (default ./mocks)]
  */
 'use strict';
 
 const fs = require('node:fs');
 const path = require('node:path');
+const YAML = require('yaml');
 
 const HTTP_METHODS = new Set(['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace']);
 const WILDCARD = '__';
@@ -164,6 +165,24 @@ function responseBody(response, spec) {
   return undefined;
 }
 
+/**
+ * extracts an example request body of an operation for Swagger 2.0 (in: body parameter)
+ * and OpenAPI 3.x (requestBody)
+ * @return the body value or undefined if the operation takes no body
+ */
+function requestBodyExample(operation, pathItem, spec) {
+  const params = [...(pathItem.parameters || []), ...(operation.parameters || [])].map(p =>
+    p && p.$ref ? resolveRef(spec, p.$ref) : p
+  );
+  const bodyParam = params.find(p => p && p.in === 'body');
+  if (bodyParam) return bodyParam.schema ? createExample(bodyParam.schema, spec) : undefined;
+  let requestBody = operation.requestBody;
+  if (!requestBody) return undefined;
+  if (requestBody.$ref) requestBody = resolveRef(spec, requestBody.$ref);
+  // same shape as an OpenAPI 3 response (content -> media type -> example / schema)
+  return responseBody(requestBody, spec);
+}
+
 function basePathOf(spec) {
   let base = '';
   if (spec.swagger) {
@@ -180,13 +199,24 @@ function basePathOf(spec) {
 
 /**
  * writes the mock files for the given spec
- * @return list of written files
+ * @param {any} spec parsed Swagger / OpenAPI document
+ * @param {string} outDir
+ * @param {{log?: (msg: string) => void, overwrite?: boolean}} [options] overwrite: replace existing files
+ * @return {string[]} written files
  */
-function buildDirectoryTree(spec, outDir, { log = console.log } = {}) {
+function buildDirectoryTree(spec, outDir, { log = console.log, overwrite = false } = {}) {
   if (!spec || typeof spec.paths !== 'object') {
     throw new Error('The given document is not a Swagger 2.0 / OpenAPI 3 spec (no "paths")');
   }
   const written = [];
+  const writeFile = (file, content) => {
+    if (!overwrite && fs.existsSync(file)) {
+      log(`skipped (exists): ${file}`);
+      return;
+    }
+    fs.writeFileSync(file, content);
+    written.push(file);
+  };
   const basePath = basePathOf(spec);
   for (const [apiPath, pathItem] of Object.entries(spec.paths)) {
     // replace every path parameter ({id}) with the wildcard folder
@@ -201,28 +231,43 @@ function buildDirectoryTree(spec, outDir, { log = console.log } = {}) {
       const status = picked ? picked.status : 200;
       const body = picked ? responseBody(picked.response, spec) : undefined;
 
+      // example request, for reference: the server never sends .request.json files
+      const request = requestBodyExample(operation, pathItem, spec);
+      if (request !== undefined) {
+        writeFile(path.join(dir, name + '.request.json'), JSON.stringify(request, null, 4) + '\n');
+      }
+
       if (status !== 200) {
-        const headerFile = path.join(dir, name + '.header');
-        if (!fs.existsSync(headerFile)) {
-          const statusLine = `HTTP/1.1 ${status} ${STATUS_TEXT[status] || ''}`.trim();
-          fs.writeFileSync(headerFile, [statusLine, ...DEFAULT_HEADER_LINES].join('\n') + '\n');
-          written.push(headerFile);
-        }
+        const statusLine = `HTTP/1.1 ${status} ${STATUS_TEXT[status] || ''}`.trim();
+        writeFile(path.join(dir, name + '.header'), [statusLine, ...DEFAULT_HEADER_LINES].join('\n') + '\n');
       }
       // 204 / 304 must not have a body
       if (status === 204 || status === 304) continue;
 
-      const jsonFile = path.join(dir, name + '.json');
-      if (fs.existsSync(jsonFile)) {
-        log(`skipped (exists): ${jsonFile}`);
-        continue;
-      }
       const content = body === undefined ? { auto_generated: true } : body;
-      fs.writeFileSync(jsonFile, JSON.stringify(content, null, 4) + '\n');
-      written.push(jsonFile);
+      writeFile(path.join(dir, name + '.json'), JSON.stringify(content, null, 4) + '\n');
     }
   }
   return written;
+}
+
+/**
+ * parses a spec in JSON or YAML
+ */
+function parseSpec(text, source) {
+  try {
+    return JSON.parse(text);
+  } catch (jsonError) {
+    try {
+      return YAML.parse(text);
+    } catch (yamlError) {
+      const looksLikeJson = /^\s*[[{]/.test(text) || /\.json$/i.test(source);
+      // report the error of the format the file was meant to be in
+      const error = looksLikeJson ? jsonError : yamlError;
+      const message = `Cannot parse ${source} as ${looksLikeJson ? 'JSON' : 'YAML'}: ${error.message}`;
+      throw new Error(message, { cause: error }); // eslint-disable-line preserve-caught-error -- cause is one of the two caught errors
+    }
+  }
 }
 
 async function loadSpec(source) {
@@ -231,22 +276,26 @@ async function loadSpec(source) {
     if (!response.ok) {
       throw new Error(`Failed to download ${source}: ${response.status} ${response.statusText}`);
     }
-    return response.json();
+    return parseSpec(await response.text(), source);
   }
-  return JSON.parse(await fs.promises.readFile(path.resolve(source), 'utf8'));
+  return parseSpec(await fs.promises.readFile(path.resolve(source), 'utf8'), source);
 }
 
+const USAGE =
+  'Usage: generate-mock-structure [--overwrite] <spec.json | spec.yaml | http(s)://host/spec> [outDir (default ./mocks)]';
+
 async function main(argv) {
-  if (argv.length < 1 || argv.length > 2 || argv[0] === '-h' || argv[0] === '--help') {
-    console.error(
-      'Usage: generate-mock-structure <swagger.json | http(s)://host/swagger.json> [outDir (default ./mocks)]'
-    );
+  const flags = argv.filter(a => a.startsWith('-'));
+  const args = argv.filter(a => !a.startsWith('-'));
+  const unknown = flags.filter(f => f !== '--overwrite');
+  if (args.length < 1 || args.length > 2 || unknown.length) {
+    console.error(USAGE);
     process.exit(1);
   }
-  const outDir = path.resolve(argv[1] || 'mocks');
+  const outDir = path.resolve(args[1] || 'mocks');
   try {
-    const spec = await loadSpec(argv[0]);
-    const written = buildDirectoryTree(spec, outDir);
+    const spec = await loadSpec(args[0]);
+    const written = buildDirectoryTree(spec, outDir, { overwrite: flags.includes('--overwrite') });
     written.forEach(f => console.log(`created: ${f}`));
     console.log(`\n${written.length} file(s) written to ${outDir}`);
     console.log(`Start the server with: node ${path.join(__dirname, 'mockserver.js')} -m ${outDir}`);
@@ -260,4 +309,13 @@ if (require.main === module) {
   main(process.argv.slice(2));
 }
 
-module.exports = { buildDirectoryTree, createExample, resolveRef, pickResponse, responseBody, loadSpec };
+module.exports = {
+  buildDirectoryTree,
+  createExample,
+  resolveRef,
+  pickResponse,
+  responseBody,
+  requestBodyExample,
+  loadSpec,
+  parseSpec
+};
