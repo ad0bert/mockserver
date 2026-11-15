@@ -1,8 +1,26 @@
 {
-  "name": "mockserver",
-  "version": "1.0.0",
-  "private": true,
+  "name": "@ad0bert/mockserver",
+  "version": "1.0.1",
   "description": "Local webserver delivering file based mock responses for http requests, with a Swagger / OpenAPI mock generator",
+  "keywords": [
+    "mock",
+    "mock-server",
+    "api-mock",
+    "openapi",
+    "swagger",
+    "http",
+    "testing",
+    "proxy",
+    "record"
+  ],
+  "homepage": "https://github.com/ad0bert/mockserver#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ad0bert/mockserver.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ad0bert/mockserver/issues"
+  },
   "author": "Peter Ortner",
   "license": "MIT",
   "main": "mockserver.js",
@@ -13,7 +31,8 @@
   "files": [
     "mockserver.js",
     "lib/",
-    "generate-mock-structure.js"
+    "generate-mock-structure.js",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "start": "node mockserver.js",
@@ -39,5 +58,8 @@
     "globals": "17.14.0",
     "prettier": "3.9.10",
     "typescript": "7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -17,11 +17,19 @@ Requires **Node.js 22 or newer**. The server has no runtime dependencies; readin
 
 ## Quick start
 
-Try the [Swagger Petstore demo](demo/README.md), which shows every feature:
+Generate mocks from your API's spec and start the server, straight from npm:
 
 ```console
-user@local:~$ npm run demo
-user@local:~$ curl localhost:8181/api/v3/pet/42
+user@local:~$ npx -p @ad0bert/mockserver generate-mock-structure ./openapi.yaml   # writes ./mocks
+user@local:~$ npx @ad0bert/mockserver                                             # serves ./mocks on port 8181
+```
+
+To keep it in a project, install it as a dev dependency; `npx mockserver` and `npx generate-mock-structure` then
+use that version:
+
+```console
+user@local:~$ npm install --save-dev @ad0bert/mockserver
+user@local:~$ npx mockserver -m ./mocks
 ```
 
 Or with Docker, no Node needed:
@@ -31,12 +39,12 @@ user@local:~$ docker build -t mockserver .
 user@local:~$ docker run --rm -p 8181:8181 mockserver
 ```
 
-For your own API, generate mocks from its spec and start the server:
+The [Swagger Petstore demo](demo/README.md) shows every feature. Run it from a clone of this repository:
 
 ```console
 user@local:~$ npm install
-user@local:~$ node generate-mock-structure.js ./openapi.yaml    # writes ./mocks
-user@local:~$ node mockserver.js                                # serves ./mocks on port 8181
+user@local:~$ npm run demo
+user@local:~$ curl localhost:8181/api/v3/pet/42
 ```
 
 ## Writing mocks

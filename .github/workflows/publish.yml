@@ -1,0 +1,42 @@
+name: Publish to npm
+
+# Runs when a GitHub release is published. The release tag has to match the version
+# in package.json (v1.2.3 <-> 1.2.3). Pre-releases are published with the "next" dist-tag,
+# so `npm install @ad0bert/mockserver` keeps installing the latest stable version.
+#
+# Authentication, either of:
+# - npm trusted publishing (recommended, no secret): on npmjs.com, in the package settings, add a
+#   trusted publisher for GitHub Actions with repository ad0bert/mockserver and workflow publish.yml.
+# - an npm access token in the repository secret NPM_TOKEN (for example for the very first publish).
+# npm tries trusted publishing first and uses the token otherwise.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # trusted publishing and provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - name: Check that the release tag matches package.json
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match package.json version $version (expected v$version)"
+            exit 1
+          fi
+      - run: npm run check
+      - name: Publish
+        run: npm publish --provenance --tag "${{ github.event.release.prerelease && 'next' || 'latest' }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

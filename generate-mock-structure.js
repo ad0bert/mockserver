@@ -299,7 +299,11 @@ async function main(argv) {
     const written = buildDirectoryTree(spec, outDir, { overwrite: flags.includes('--overwrite') });
     written.forEach(f => console.log(`created: ${f}`));
     console.log(`\n${written.length} file(s) written to ${outDir}`);
-    console.log(`Start the server with: node ${path.join(__dirname, 'mockserver.js')} -m ${outDir}`);
+    // installed from npm the server is available as a command
+    const server = __dirname.split(path.sep).includes('node_modules')
+      ? 'npx mockserver'
+      : `node ${path.join(__dirname, 'mockserver.js')}`;
+    console.log(`Start the server with: ${server} -m ${outDir}`);
   } catch (e) {
     console.error(`Error: ${e.message}`);
     process.exit(1);

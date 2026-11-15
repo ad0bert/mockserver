@@ -3,6 +3,23 @@
 All notable changes to this project are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-11-15
+
+### Added
+
+- Published on npm as [`@ad0bert/mockserver`](https://www.npmjs.com/package/@ad0bert/mockserver):
+  `npx @ad0bert/mockserver` runs the server, `npx -p @ad0bert/mockserver generate-mock-structure` the generator.
+- GitHub releases publish to npm automatically, with provenance.
+
+### Changed
+
+- When installed from npm, the generator suggests `npx mockserver` to start the server.
+
+### Fixed
+
+- Watching: changes made in the first moments after the start could be missed on macOS, where the folder watcher
+  starts asynchronously. The server now reloads once more about a second after the start.
+
 ## [1.0.0] - 2026-11-15
 
 First release. Compared with the original scripts:
@@ -50,4 +67,5 @@ First release. Compared with the original scripts:
   `parameters`; specs without `basePath` wrote into a `mocksundefined` folder; some output wasn't valid JSON;
   self-referencing schemas never finished; folders and files went to different places when run from another directory.
 
+[1.0.1]: https://github.com/ad0bert/mockserver/releases/tag/v1.0.1
 [1.0.0]: https://github.com/ad0bert/mockserver/releases/tag/v1.0.0
