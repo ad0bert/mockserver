@@ -8,7 +8,6 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const YAML = require('yaml');
 
 const HTTP_METHODS = new Set(['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace']);
 const WILDCARD = '__';
@@ -259,7 +258,8 @@ function parseSpec(text, source) {
     return JSON.parse(text);
   } catch (jsonError) {
     try {
-      return YAML.parse(text);
+      // loaded on demand, JSON specs work without npm install
+      return require('yaml').parse(text);
     } catch (yamlError) {
       const looksLikeJson = /^\s*[[{]/.test(text) || /\.json$/i.test(source);
       // report the error of the format the file was meant to be in
