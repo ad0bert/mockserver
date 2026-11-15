@@ -14,6 +14,22 @@ const rules = require('./lib/rules');
 const proxy = require('./lib/proxy');
 
 // ----------------------- program defaults -----------------------
+/**
+ * @typedef {object} ServerOptions
+ * @property {number} port
+ * @property {string} host
+ * @property {string} mockDir mock root
+ * @property {number} verbose log level 0-5
+ * @property {boolean} liveCheck check the filesystem on every request instead of using an index
+ * @property {boolean} watch reload on changes in the mock folder
+ * @property {number} watchDelay ms to wait for more changes before reloading
+ * @property {string | null} target backend for requests without a mock
+ * @property {boolean} record write proxied responses as mock files
+ * @property {number} proxyTimeout ms
+ * @property {(type: string, message: string) => void} [logger] replaces the console logger
+ */
+
+/** @type {Readonly<ServerOptions>} */
 const DEFAULTS = Object.freeze({
   port: 8181,
   host: '127.0.0.1',
@@ -62,13 +78,7 @@ const LOG_LVL = Object.freeze({
 });
 
 // levels that can be silenced, in the order they get enabled by -v (0-5)
-const VERBOSITY_ORDER = [
-  LOG_LVL.LOG,
-  LOG_LVL.INFO,
-  LOG_LVL.SUCCESS,
-  LOG_LVL.WARN,
-  LOG_LVL.DEBUG
-];
+const VERBOSITY_ORDER = [LOG_LVL.LOG, LOG_LVL.INFO, LOG_LVL.SUCCESS, LOG_LVL.WARN, LOG_LVL.DEBUG];
 
 const COLORS = {
   [LOG_LVL.LOG]: '\x1b[39m',
@@ -88,9 +98,7 @@ function createLogger(verbose) {
     if (ignored.has(type)) return;
     const isError = type === LOG_LVL.ERROR || type === LOG_LVL.FATAL;
     const stream = isError || type === LOG_LVL.WARN ? process.stderr : process.stdout;
-    const text = stream.isTTY
-      ? `${COLORS[type] || COLORS[LOG_LVL.FATAL]}${message}${COLOR_RESET}`
-      : String(message);
+    const text = stream.isTTY ? `${COLORS[type] || COLORS[LOG_LVL.FATAL]}${message}${COLOR_RESET}` : String(message);
     stream.write(text + '\n');
   };
 }
@@ -106,6 +114,7 @@ const USAGE =
  * @return options object or throws on invalid input
  */
 function parseArgs(argv) {
+  /** @type {ServerOptions} */
   const options = { ...DEFAULTS };
   if (argv.length % 2 !== 0) {
     throw new Error(USAGE);
@@ -384,11 +393,7 @@ function splitUrl(url) {
       return null;
     }
     // prevent path traversal outside of the mock root
-    if (
-      segment === '.' ||
-      segment === '..' ||
-      /[/\\\0]/.test(segment)
-    ) {
+    if (segment === '.' || segment === '..' || /[/\\\0]/.test(segment)) {
       return null;
     }
     segments.push(segment);
@@ -469,10 +474,11 @@ function readOptionalFile(file) {
 
 /**
  * creates (but does not start) the mock server
- * @param options see DEFAULTS
- * @return http.Server
+ * @param {Partial<ServerOptions>} [options] see DEFAULTS
+ * @return {http.Server}
  */
 function createMockServer(options = {}) {
+  /** @type {ServerOptions} */
   const opts = { ...DEFAULTS, ...options };
   const log = opts.logger || createLogger(opts.verbose);
 
@@ -642,7 +648,11 @@ function createMockServer(options = {}) {
     await applyHeader(res, header);
     if (body === null) return res.end();
     // same precedence as for mock files: rule headers, then DEFAULT.header for JSON, then the extension
-    if (type && !ruleNames.has('content-type') && (!type.startsWith('application/json') || !res.hasHeader('content-type'))) {
+    if (
+      type &&
+      !ruleNames.has('content-type') &&
+      (!type.startsWith('application/json') || !res.hasHeader('content-type'))
+    ) {
       res.setHeader('Content-Type', type);
     }
     res.setHeader('Content-Length', body.length);
@@ -699,7 +709,10 @@ function createMockServer(options = {}) {
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch(err => {
       const status = (err && err.statusCode) || 500;
-      log(status >= 500 ? LOG_LVL.FATAL : LOG_LVL.ERROR, 'Error: ' + (status >= 500 && err && err.stack ? err.stack : err));
+      log(
+        status >= 500 ? LOG_LVL.FATAL : LOG_LVL.ERROR,
+        'Error: ' + (status >= 500 && err && err.stack ? err.stack : err)
+      );
       if (!res.headersSent) {
         res.statusCode = status;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');

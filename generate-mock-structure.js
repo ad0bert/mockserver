@@ -238,7 +238,9 @@ async function loadSpec(source) {
 
 async function main(argv) {
   if (argv.length < 1 || argv.length > 2 || argv[0] === '-h' || argv[0] === '--help') {
-    console.error('Usage: generate-mock-structure <swagger.json | http(s)://host/swagger.json> [outDir (default ./mocks)]');
+    console.error(
+      'Usage: generate-mock-structure <swagger.json | http(s)://host/swagger.json> [outDir (default ./mocks)]'
+    );
     process.exit(1);
   }
   const outDir = path.resolve(argv[1] || 'mocks');
