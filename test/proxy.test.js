@@ -148,7 +148,10 @@ test('proxy with recording', async t => {
       assert.match(header, /^Access-Control-Allow-Origin: \*$/m);
       assert.doesNotMatch(header, /content-length|^date:/im);
       // pretty printed JSON
-      assert.equal(fs.readFileSync(path.join(dir, 'GET--page=2.json'), 'utf8'), JSON.stringify({ users: [1, 2], url: '/api/users?page=2' }, null, 4) + '\n');
+      assert.equal(
+        fs.readFileSync(path.join(dir, 'GET--page=2.json'), 'utf8'),
+        JSON.stringify({ users: [1, 2], url: '/api/users?page=2' }, null, 4) + '\n'
+      );
 
       // the second call is answered from the recording, without the backend
       const calls = seen.length;
@@ -184,7 +187,12 @@ test('unreachable target gives 502', async t => {
   const closed = http.createServer();
   const deadPort = await listen(closed);
   await new Promise(r => closed.close(r));
-  const server = createMockServer({ mockDir: root, target: `http://127.0.0.1:${deadPort}`, logger: () => {}, watch: false });
+  const server = createMockServer({
+    mockDir: root,
+    target: `http://127.0.0.1:${deadPort}`,
+    logger: () => {},
+    watch: false
+  });
   const port = await listen(server);
   t.after(() => server.close());
   const res = await fetch(`http://127.0.0.1:${port}/x`);
@@ -196,7 +204,12 @@ test('target with a base path', async t => {
   const { backend, seen } = startBackend();
   const backendPort = await listen(backend);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-'));
-  const server = createMockServer({ mockDir: root, target: `http://127.0.0.1:${backendPort}/api/`, logger: () => {}, watch: false });
+  const server = createMockServer({
+    mockDir: root,
+    target: `http://127.0.0.1:${backendPort}/api/`,
+    logger: () => {},
+    watch: false
+  });
   const port = await listen(server);
   t.after(() => {
     server.close();

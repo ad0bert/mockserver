@@ -18,9 +18,25 @@
   "scripts": {
     "start": "node mockserver.js",
     "generate": "node generate-mock-structure.js",
-    "test": "node --test"
+    "test": "node --test",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "tsc -p .",
+    "check": "npm run lint && npm run typecheck && npm test"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.5",
+    "eslint": "10.14.0",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.14.0",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2"
   }
 }

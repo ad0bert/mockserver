@@ -28,7 +28,10 @@ for (const liveCheck of [true, false]) {
     write(root, 'login/POST.rules.json', LOGIN_RULES);
     write(root, 'login/POST.json', { fallback: true });
     write(root, 'users/__/GET.rules.json', [
-      { match: { headers: { authorization: { $regex: '^bearer ', $flags: 'i' } }, query: { page: 2 } }, file: 'page2.json' },
+      {
+        match: { headers: { authorization: { $regex: '^bearer ', $flags: 'i' } }, query: { page: 2 } },
+        file: 'page2.json'
+      },
       { match: { headers: { 'X-Tenant': 'acme' } }, file: '../../files/acme.xml' },
       { match: { headers: { 'x-escape': '1' } }, file: '../../../outside.json' },
       { match: { headers: { 'x-slow': '1' } }, delay: 60, status: 204 }
@@ -139,7 +142,9 @@ test('matchValue', () => {
 
 test('ruleMatches: no match block matches everything, numbers vs header strings', () => {
   assert.ok(ruleMatches({}, { headers: {}, query: {}, body: '', rawBody: '' }));
-  assert.ok(ruleMatches({ match: { headers: { 'X-N': 5 } } }, { headers: { 'x-n': '5' }, query: {}, body: '', rawBody: '' }));
+  assert.ok(
+    ruleMatches({ match: { headers: { 'X-N': 5 } } }, { headers: { 'x-n': '5' }, query: {}, body: '', rawBody: '' })
+  );
 });
 
 test('parseRules validation', () => {

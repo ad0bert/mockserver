@@ -12,8 +12,25 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const rules = require('./lib/rules');
 const proxy = require('./lib/proxy');
+const templates = require('./lib/templates');
 
 // ----------------------- program defaults -----------------------
+/**
+ * @typedef {object} ServerOptions
+ * @property {number} port
+ * @property {string} host
+ * @property {string} mockDir mock root
+ * @property {number} verbose log level 0-5
+ * @property {boolean} liveCheck check the filesystem on every request instead of using an index
+ * @property {boolean} watch reload on changes in the mock folder
+ * @property {number} watchDelay ms to wait for more changes before reloading
+ * @property {string | null} target backend for requests without a mock
+ * @property {boolean} record write proxied responses as mock files
+ * @property {number} proxyTimeout ms
+ * @property {(type: string, message: string) => void} [logger] replaces the console logger
+ */
+
+/** @type {Readonly<ServerOptions>} */
 const DEFAULTS = Object.freeze({
   port: 8181,
   host: '127.0.0.1',
@@ -30,7 +47,7 @@ const DEFAULTS = Object.freeze({
 const WILDCARD = '__';
 const QUERY_SEPARATOR = '--';
 // files next to the body files that are never served as a body
-const SPECIAL_EXT = { header: 'header', rules: 'rules.json' };
+const SPECIAL_EXT = { header: 'header', rules: 'rules.json', request: 'request.json' };
 const SPECIAL_EXTS = new Set(Object.values(SPECIAL_EXT));
 
 const DEFAULT_OPTIONS_HEADER = [
@@ -62,13 +79,7 @@ const LOG_LVL = Object.freeze({
 });
 
 // levels that can be silenced, in the order they get enabled by -v (0-5)
-const VERBOSITY_ORDER = [
-  LOG_LVL.LOG,
-  LOG_LVL.INFO,
-  LOG_LVL.SUCCESS,
-  LOG_LVL.WARN,
-  LOG_LVL.DEBUG
-];
+const VERBOSITY_ORDER = [LOG_LVL.LOG, LOG_LVL.INFO, LOG_LVL.SUCCESS, LOG_LVL.WARN, LOG_LVL.DEBUG];
 
 const COLORS = {
   [LOG_LVL.LOG]: '\x1b[39m',
@@ -88,9 +99,7 @@ function createLogger(verbose) {
     if (ignored.has(type)) return;
     const isError = type === LOG_LVL.ERROR || type === LOG_LVL.FATAL;
     const stream = isError || type === LOG_LVL.WARN ? process.stderr : process.stdout;
-    const text = stream.isTTY
-      ? `${COLORS[type] || COLORS[LOG_LVL.FATAL]}${message}${COLOR_RESET}`
-      : String(message);
+    const text = stream.isTTY ? `${COLORS[type] || COLORS[LOG_LVL.FATAL]}${message}${COLOR_RESET}` : String(message);
     stream.write(text + '\n');
   };
 }
@@ -106,6 +115,7 @@ const USAGE =
  * @return options object or throws on invalid input
  */
 function parseArgs(argv) {
+  /** @type {ServerOptions} */
   const options = { ...DEFAULTS };
   if (argv.length % 2 !== 0) {
     throw new Error(USAGE);
@@ -384,11 +394,7 @@ function splitUrl(url) {
       return null;
     }
     // prevent path traversal outside of the mock root
-    if (
-      segment === '.' ||
-      segment === '..' ||
-      /[/\\\0]/.test(segment)
-    ) {
+    if (segment === '.' || segment === '..' || /[/\\\0]/.test(segment)) {
       return null;
     }
     segments.push(segment);
@@ -469,10 +475,11 @@ function readOptionalFile(file) {
 
 /**
  * creates (but does not start) the mock server
- * @param options see DEFAULTS
- * @return http.Server
+ * @param {Partial<ServerOptions>} [options] see DEFAULTS
+ * @return {http.Server}
  */
 function createMockServer(options = {}) {
+  /** @type {ServerOptions} */
   const opts = { ...DEFAULTS, ...options };
   const log = opts.logger || createLogger(opts.verbose);
 
@@ -509,7 +516,7 @@ function createMockServer(options = {}) {
   const lookup = createFileLookup(mockDir, opts.liveCheck);
   const resolve = (req, method, kind) => {
     const file = resolveMockFile(mockDir, lookup, req.url, method, kind, req.headers.accept);
-    if (file) log(LOG_LVL.SUCCESS, 'FILE FOUND: ' + file);
+    if (file) log(LOG_LVL.DEBUG, 'FILE FOUND: ' + file);
     return file;
   };
 
@@ -536,14 +543,21 @@ function createMockServer(options = {}) {
     }
   }
 
-  async function handleRequest(req, res) {
-    log(LOG_LVL.INFO, `${req.method} - HTTP Call for: ${req.url}`);
+  // mock root relative path for the request log
+  const rel = file => path.relative(mockDir, file).split(path.sep).join('/');
+
+  /**
+   * @param trace collects what answered the request, logged once the response is sent
+   */
+  async function handleRequest(req, res, trace) {
+    log(LOG_LVL.DEBUG, `${req.method} - HTTP Call for: ${req.url}`);
     const method = req.method.toUpperCase();
 
     // special handling for option calls (CORS preflight)
     if (method === 'OPTIONS') {
       const headerFile = resolve(req, method, 'header');
       const header = headerFile ? parseHeader(await fsp.readFile(headerFile, 'utf8')) : OPTIONS_HEADER;
+      trace.source = headerFile ? rel(headerFile) : 'default OPTIONS header';
       await applyHeader(res, header);
       return res.end();
     }
@@ -562,34 +576,56 @@ function createMockServer(options = {}) {
     // the request body is only read when rules or the proxy need it
     let requestBody = null;
     const getRequestBody = async () => (requestBody ??= await rules.readRequestBody(req));
+    // request data for rules and templates
+    let info = null;
+    const getRequestInfo = async () => {
+      if (!info) {
+        const parts = splitUrl(req.url);
+        info = {
+          ...rules.requestInfo(req, await getRequestBody()),
+          method,
+          url: req.url,
+          segments: parts ? parts.segments : []
+        };
+      }
+      return info;
+    };
 
     if (found.rulesFile) {
       const list = rules.parseRules(await fsp.readFile(found.rulesFile, 'utf8'), found.rulesFile);
-      const info = rules.requestInfo(req, await getRequestBody());
-      const index = list.findIndex(rule => rules.ruleMatches(rule, info));
+      const request = await getRequestInfo();
+      const index = list.findIndex(rule => rules.ruleMatches(rule, request));
       if (index >= 0) {
-        log(LOG_LVL.SUCCESS, `RULE MATCHED: #${index} in ${found.rulesFile}`);
-        return sendRule(res, method, list[index], path.dirname(found.rulesFile));
+        trace.source = `rule #${index} in ${rel(found.rulesFile)}`;
+        return sendRule(res, method, list[index], path.dirname(found.rulesFile), request);
       }
-      log(LOG_LVL.INFO, `no rule matched in ${found.rulesFile}, using the mock files`);
+      log(LOG_LVL.DEBUG, `no rule matched in ${found.rulesFile}, using the mock files`);
     }
 
     const { headerFile, bodyFile } = found;
-    const [headerContent, body] = await Promise.all([
+    const [headerContent, fileContent] = await Promise.all([
       headerFile ? fsp.readFile(headerFile, 'utf8') : null,
       bodyFile ? fsp.readFile(bodyFile) : null
     ]);
+    const body =
+      fileContent && templates.isTemplateFile(bodyFile)
+        ? Buffer.from(
+            templates.render(fileContent.toString('utf8'), await getRequestInfo(), templates.escapingFor(bodyFile))
+          )
+        : fileContent;
 
     if (body === null && !headerFile) {
       // paths rejected by splitUrl (i.e. '..') are not forwarded either
-      if (opts.target && splitUrl(req.url)) return proxyRequest(req, res, method, await getRequestBody());
-      log(LOG_LVL.ERROR, `NOT FOUND: ${method} ${req.url}`);
+      if (opts.target && splitUrl(req.url)) return proxyRequest(req, res, method, await getRequestBody(), trace);
+      trace.source = 'no mock found';
+      trace.failed = true;
       await applyHeader(res, DEFAULT_HEADER);
       res.statusCode = 404;
       return res.end();
     }
 
     // a .header file without a body is a valid mock (i.e. 204 No Content, redirects)
+    trace.source = rel(bodyFile || headerFile);
     const header = headerContent !== null ? parseHeader(headerContent) : DEFAULT_HEADER;
     await applyHeader(res, header);
     if (body === null) return res.end();
@@ -608,11 +644,12 @@ function createMockServer(options = {}) {
   /**
    * answers a request with a matched rule (see lib/rules.js)
    * @param dir folder of the rules file, "file" is resolved against it
+   * @param request request data for the placeholders in headers and body
    */
-  async function sendRule(res, method, rule, dir) {
+  async function sendRule(res, method, rule, dir, request) {
     if (rule.delay > 0) await delay(rule.delay);
     const extra = Object.entries(rule.headers || {}).flatMap(([name, value]) =>
-      (Array.isArray(value) ? value : [value]).map(v => [name, String(v)])
+      (Array.isArray(value) ? value : [value]).map(v => [name, templates.render(String(v), request, 'header')])
     );
     const ruleNames = new Set(extra.map(([n]) => n.toLowerCase()));
     const header = {
@@ -629,12 +666,16 @@ function createMockServer(options = {}) {
         throw new Error(`Rule file '${rule.file}' is outside of the mock directory`);
       }
       body = await fsp.readFile(file);
+      if (templates.isTemplateFile(file)) {
+        body = Buffer.from(templates.render(body.toString('utf8'), request, templates.escapingFor(file)));
+      }
       type = contentTypeFor(file);
     } else if (rule.body !== undefined) {
       if (typeof rule.body === 'string') {
-        body = Buffer.from(rule.body); // sent as is, with the DEFAULT.header content type
+        // sent with the DEFAULT.header content type
+        body = Buffer.from(templates.render(rule.body, request, 'raw'));
       } else {
-        body = Buffer.from(JSON.stringify(rule.body, null, 4));
+        body = Buffer.from(templates.render(JSON.stringify(rule.body, null, 4), request, 'json'));
         type = contentTypeFor('x.json');
       }
     }
@@ -642,7 +683,11 @@ function createMockServer(options = {}) {
     await applyHeader(res, header);
     if (body === null) return res.end();
     // same precedence as for mock files: rule headers, then DEFAULT.header for JSON, then the extension
-    if (type && !ruleNames.has('content-type') && (!type.startsWith('application/json') || !res.hasHeader('content-type'))) {
+    if (
+      type &&
+      !ruleNames.has('content-type') &&
+      (!type.startsWith('application/json') || !res.hasHeader('content-type'))
+    ) {
       res.setHeader('Content-Type', type);
     }
     res.setHeader('Content-Length', body.length);
@@ -652,33 +697,41 @@ function createMockServer(options = {}) {
   /**
    * forwards a request without a mock to the proxy target, optionally records the answer
    */
-  async function proxyRequest(req, res, method, body) {
+  async function proxyRequest(req, res, method, body, trace) {
     let upstream;
     try {
       upstream = await proxy.forward({ target: opts.target, req, method, body, timeout: opts.proxyTimeout });
     } catch (e) {
       const reason = (e.cause && e.cause.message) || e.message;
-      log(LOG_LVL.ERROR, `PROXY FAILED: ${method} ${req.url} -> ${opts.target}: ${reason}`);
+      trace.source = `proxy to ${opts.target} failed: ${reason}`;
+      trace.failed = true;
       res.statusCode = 502;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       return res.end(`Proxy to ${opts.target} failed: ${reason}`);
     }
-    log(LOG_LVL.INFO, `PROXIED: ${method} ${req.url} -> ${upstream.status}`);
+    trace.source = `proxy ${opts.target}`;
     const headers = proxy.withDefaults(upstream.headers, DEFAULT_HEADER.headers);
+    // record first, so the files exist when the client sends its next request
+    if (opts.record && method !== 'HEAD') {
+      const count = recordResponse(req, method, upstream.status, headers, upstream.body);
+      if (count) trace.source += `, recorded ${count} file(s)`;
+    }
     await applyHeader(res, { statusCode: upstream.status, headers });
     if (method === 'HEAD') return res.end();
     res.setHeader('Content-Length', upstream.body.length);
     res.end(upstream.body);
-    if (opts.record) recordResponse(req, method, upstream.status, headers, upstream.body);
   }
 
+  /**
+   * @return number of written files
+   */
   function recordResponse(req, method, status, headers, body) {
     if (status >= 500) {
       log(LOG_LVL.WARN, `NOT RECORDED: ${method} ${req.url} answered ${status}`);
-      return;
+      return 0;
     }
     const parts = splitUrl(req.url);
-    if (!parts) return;
+    if (!parts) return 0;
     const dir = path.join(mockDir, ...parts.segments);
     const baseName = parts.query ? method + QUERY_SEPARATOR + parts.query : method;
     // user defined headers (i.e. a delay from DEFAULT.header) apply anyway, don't copy them into the mock
@@ -687,8 +740,10 @@ function createMockServer(options = {}) {
       const written = proxy.record({ dir, baseName, status, headers: recorded, body, mimeTypes: MIME_TYPES });
       written.forEach(f => log(LOG_LVL.SUCCESS, 'RECORDED: ' + f));
       if (written.length) lookup.rebuild();
+      return written.length;
     } catch (e) {
       log(LOG_LVL.ERROR, `Recording ${method} ${req.url} failed: ${e.message}`);
+      return 0;
     }
   }
 
@@ -697,9 +752,24 @@ function createMockServer(options = {}) {
   }
 
   const server = http.createServer((req, res) => {
-    handleRequest(req, res).catch(err => {
+    const start = process.hrtime.bigint();
+    const trace = { source: '', failed: false };
+    // one line per request: method, url, status, duration and what answered it
+    res.on('close', () => {
+      const ms = Number(process.hrtime.bigint() - start) / 1e6;
+      const status = res.writableFinished ? res.statusCode : 'aborted';
+      const line =
+        `${req.method} ${req.url} ${status} ${ms.toFixed(1)}ms` + (trace.source ? ` <- ${trace.source}` : '');
+      log(trace.failed ? LOG_LVL.ERROR : LOG_LVL.INFO, line);
+    });
+    handleRequest(req, res, trace).catch(err => {
       const status = (err && err.statusCode) || 500;
-      log(status >= 500 ? LOG_LVL.FATAL : LOG_LVL.ERROR, 'Error: ' + (status >= 500 && err && err.stack ? err.stack : err));
+      trace.source = `error: ${err && err.message}`;
+      trace.failed = true;
+      log(
+        status >= 500 ? LOG_LVL.FATAL : LOG_LVL.ERROR,
+        'Error: ' + (status >= 500 && err && err.stack ? err.stack : err)
+      );
       if (!res.headersSent) {
         res.statusCode = status;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
