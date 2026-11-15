@@ -236,3 +236,17 @@ test('extensionForType', () => {
   assert.equal(extensionForType('', mimes), 'bin');
   assert.equal(extensionForType('application/x-thing', mimes), 'bin');
 });
+
+test('recording creates a missing mock folder', async t => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-')), 'new', 'mocks');
+  const server = createMockServer({
+    mockDir: dir,
+    target: 'http://127.0.0.1:9',
+    record: true,
+    logger: () => {},
+    watch: false
+  });
+  t.after(() => server.close());
+  assert.ok(fs.statSync(dir).isDirectory());
+  assert.throws(() => createMockServer({ mockDir: dir + '-missing', logger: () => {} }), /does not exist/);
+});

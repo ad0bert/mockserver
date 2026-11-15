@@ -1,0 +1,5 @@
+[
+    { "match": { "headers": { "X-Demo-Fault": "reset" } }, "fault": "reset" },
+    { "match": { "headers": { "X-Demo-Fault": "timeout" } }, "fault": "timeout" },
+    { "match": { "headers": { "X-Demo-Fault": "slow" } }, "delay": 2000, "body": { "username": "{{path.3}}", "slow": true } }
+]

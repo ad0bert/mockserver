@@ -1,0 +1,8 @@
+{
+    "id": {{randomInt 1 1000}},
+    "petId": {{body.petId | 0}},
+    "quantity": {{body.quantity | 1}},
+    "shipDate": "{{now}}",
+    "status": "placed",
+    "complete": false
+}

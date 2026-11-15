@@ -132,6 +132,7 @@ function rawGet(port, p) {
 
 test('parseArgs', () => {
   assert.equal(parseArgs([]).port, 8181);
+  assert.equal(parseArgs([]).mockDir, path.resolve('mocks'));
   const opts = parseArgs(['-p', '9000', '-m', '/abs/mocks', '-l', 'false', '-v', '4', '-H', '0.0.0.0']);
   assert.equal(opts.port, 9000);
   assert.equal(opts.mockDir, path.resolve('/abs/mocks'));

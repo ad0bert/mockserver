@@ -1,0 +1,7 @@
+[
+    {
+        "probability": 0.25,
+        "status": 500,
+        "body": { "code": 500, "message": "Random failure, roughly every 4th request" }
+    }
+]

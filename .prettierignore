@@ -1,3 +1,5 @@
 node_modules/
-mocks/
+/mocks/
 package-lock.json
+demo/mocks/
+demo/petstore/

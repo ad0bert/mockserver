@@ -7,12 +7,14 @@
 'use strict';
 
 const http = require('node:http');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const rules = require('./lib/rules');
 const proxy = require('./lib/proxy');
 const templates = require('./lib/templates');
+const { safeFileName } = require('./lib/names');
 
 // ----------------------- program defaults -----------------------
 /**
@@ -34,7 +36,7 @@ const templates = require('./lib/templates');
 const DEFAULTS = Object.freeze({
   port: 8181,
   host: '127.0.0.1',
-  mockDir: path.resolve(__dirname, '../mocks'),
+  mockDir: path.resolve('mocks'), // ./mocks in the current directory, like the generator
   verbose: 2,
   liveCheck: true,
   watch: true,
@@ -53,7 +55,6 @@ const SPECIAL_EXTS = new Set(Object.values(SPECIAL_EXT));
 const DEFAULT_OPTIONS_HEADER = [
   'HTTP/1.1 202 Accepted',
   'Content-Length: 0',
-  'X-Powered-By: Undertow/1',
   'Access-Control-Allow-Origin: *',
   'Access-Control-Allow-Headers: Origin, X-Requested-With, Content-Type, Accept, Cache-Control, Pragma, Expires, Authorization, X-Request-ID',
   'Access-Control-Allow-Methods: GET, POST, OPTIONS, DELETE, PUT'
@@ -431,12 +432,15 @@ function resolveMockFile(mockDir, lookup, url, method, kind, accept) {
   if (!parts) return null;
   const { segments, query } = parts;
   const prefixes = [];
-  if (query) prefixes.push(method + QUERY_SEPARATOR + query + '.');
+  if (query) {
+    prefixes.push(method + QUERY_SEPARATOR + safeFileName(query) + '.');
+    prefixes.push(method + QUERY_SEPARATOR + query + '.');
+  }
   prefixes.push(method + '.');
 
   const pickInDir = dir => {
     const files = lookup.list(dir);
-    for (const prefix of prefixes) {
+    for (const prefix of new Set(prefixes)) {
       if (kind === 'header' || kind === 'rules') {
         const name = prefix + SPECIAL_EXT[kind];
         if (files.includes(name)) return path.join(dir, name);
@@ -455,7 +459,7 @@ function resolveMockFile(mockDir, lookup, url, method, kind, accept) {
 
   const search = (dir, i) => {
     if (i === segments.length) return pickInDir(dir);
-    for (const name of new Set([segments[i], WILDCARD])) {
+    for (const name of new Set([safeFileName(segments[i]), segments[i], WILDCARD])) {
       const next = path.join(dir, name);
       if (lookup.isDir(next)) {
         const found = search(next, i + 1);
@@ -483,6 +487,8 @@ function createMockServer(options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const log = opts.logger || createLogger(opts.verbose);
 
+  // a recording can start with an empty folder
+  if (opts.record && opts.target && !fs.existsSync(opts.mockDir)) fs.mkdirSync(opts.mockDir, { recursive: true });
   if (!fs.existsSync(opts.mockDir) || !fs.statSync(opts.mockDir).isDirectory()) {
     throw new Error(`Mock directory '${opts.mockDir}' does not exist`);
   }
@@ -592,12 +598,23 @@ function createMockServer(options = {}) {
     };
 
     if (found.rulesFile) {
-      const list = rules.parseRules(await fsp.readFile(found.rulesFile, 'utf8'), found.rulesFile);
+      const content = await fsp.readFile(found.rulesFile, 'utf8');
+      const list = rules.parseRules(content, found.rulesFile);
       const request = await getRequestInfo();
-      const index = list.findIndex(rule => rules.ruleMatches(rule, request));
+      const counts = ruleCounters(found.rulesFile, content);
+      const index = list.findIndex(
+        (rule, i) =>
+          rules.ruleMatches(rule, request) &&
+          (rule.times === undefined || (counts.get(i) || 0) < rule.times) &&
+          (rule.probability === undefined || Math.random() < rule.probability)
+      );
       if (index >= 0) {
+        const rule = list[index];
+        counts.set(index, (counts.get(index) || 0) + 1);
         trace.source = `rule #${index} in ${rel(found.rulesFile)}`;
-        return sendRule(res, method, list[index], path.dirname(found.rulesFile), request);
+        if (rule.times !== undefined) trace.source += ` (${counts.get(index)}/${rule.times})`;
+        if (rule.fault) trace.source += ` fault: ${rule.fault}`;
+        return sendRule(res, method, rule, path.dirname(found.rulesFile), request);
       }
       log(LOG_LVL.DEBUG, `no rule matched in ${found.rulesFile}, using the mock files`);
     }
@@ -641,6 +658,36 @@ function createMockServer(options = {}) {
     res.end(body);
   }
 
+  // how often each rule answered: rules file -> { hash of its content, rule index -> count }
+  const ruleUsage = new Map();
+  /**
+   * @return the counters of a rules file, they start over when the file content changes
+   */
+  function ruleCounters(file, content) {
+    const hash = crypto.createHash('sha1').update(content).digest('hex');
+    let usage = ruleUsage.get(file);
+    if (!usage || usage.hash !== hash) {
+      usage = { hash, counts: new Map() };
+      ruleUsage.set(file, usage);
+    }
+    return usage.counts;
+  }
+
+  /**
+   * simulates a broken connection instead of an http answer
+   * @param fault 'reset' | 'close' | 'timeout'
+   */
+  function sendFault(res, fault) {
+    const socket = res.socket;
+    if (fault === 'timeout') return; // never answer, the client has to give up
+    if (!socket) return;
+    if (fault === 'reset' && typeof socket.resetAndDestroy === 'function') {
+      socket.resetAndDestroy(); // TCP reset, the client sees ECONNRESET
+    } else {
+      socket.destroy(); // closed without an answer ("socket hang up" / empty reply)
+    }
+  }
+
   /**
    * answers a request with a matched rule (see lib/rules.js)
    * @param dir folder of the rules file, "file" is resolved against it
@@ -648,6 +695,7 @@ function createMockServer(options = {}) {
    */
   async function sendRule(res, method, rule, dir, request) {
     if (rule.delay > 0) await delay(rule.delay);
+    if (rule.fault) return sendFault(res, rule.fault);
     const extra = Object.entries(rule.headers || {}).flatMap(([name, value]) =>
       (Array.isArray(value) ? value : [value]).map(v => [name, templates.render(String(v), request, 'header')])
     );
@@ -732,8 +780,8 @@ function createMockServer(options = {}) {
     }
     const parts = splitUrl(req.url);
     if (!parts) return 0;
-    const dir = path.join(mockDir, ...parts.segments);
-    const baseName = parts.query ? method + QUERY_SEPARATOR + parts.query : method;
+    const dir = path.join(mockDir, ...parts.segments.map(safeFileName));
+    const baseName = parts.query ? method + QUERY_SEPARATOR + safeFileName(parts.query) : method;
     // user defined headers (i.e. a delay from DEFAULT.header) apply anyway, don't copy them into the mock
     const recorded = headers.filter(([n]) => !USER_DEFINED_HEADERS.has(n.toLowerCase()));
     try {
@@ -807,7 +855,11 @@ function main(argv) {
     const { port } = server.address();
     log(LOG_LVL.LOG, `Server running at http://${options.host}:${port}/ serving ${options.mockDir}`);
   });
-  const shutdown = () => server.close(() => process.exit(0));
+  const shutdown = () => {
+    server.close(() => process.exit(0));
+    // requests held open by a "timeout" fault must not block the shutdown
+    server.closeAllConnections();
+  };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
@@ -822,6 +874,7 @@ module.exports = {
   parseHeader,
   resolveMockFile,
   splitUrl,
+  safeFileName,
   chooseBodyFile,
   contentTypeFor,
   DEFAULTS,

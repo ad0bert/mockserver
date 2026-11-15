@@ -8,6 +8,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { safeFileName } = require('./lib/names');
 
 const HTTP_METHODS = new Set(['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace']);
 const WILDCARD = '__';
@@ -220,7 +221,7 @@ function buildDirectoryTree(spec, outDir, { log = console.log, overwrite = false
   for (const [apiPath, pathItem] of Object.entries(spec.paths)) {
     // replace every path parameter ({id}) with the wildcard folder
     const relative = (basePath + apiPath).replace(/\{[^}/]+\}/g, WILDCARD);
-    const dir = path.join(outDir, ...relative.split('/').filter(Boolean));
+    const dir = path.join(outDir, ...relative.split('/').filter(Boolean).map(safeFileName));
 
     for (const [method, operation] of Object.entries(pathItem || {})) {
       if (!HTTP_METHODS.has(method.toLowerCase()) || !operation) continue;

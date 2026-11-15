@@ -1,10 +1,10 @@
 {
   "name": "mockserver",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Local webserver delivering file based mock responses for http requests, with a Swagger / OpenAPI mock generator",
   "author": "Peter Ortner",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "main": "mockserver.js",
   "bin": {
     "mockserver": "mockserver.js",
@@ -22,7 +22,8 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc -p .",
-    "check": "npm run lint && npm run typecheck && npm test"
+    "check": "npm run lint && npm run typecheck && npm test",
+    "demo": "node mockserver.js -m demo/mocks"
   },
   "engines": {
     "node": ">=22"

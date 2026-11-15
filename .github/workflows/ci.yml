@@ -15,10 +15,17 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node: [22, 24]
+        include:
+          - os: windows-latest
+            node: 24
+          - os: macos-latest
+            node: 24
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -27,3 +34,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t mockserver .
+      - name: Smoke test the image with the built-in demo
+        run: |
+          docker run -d --name ms -p 8181:8181 mockserver
+          for i in $(seq 20); do curl -sf localhost:8181/api/v3/pet/1 > /dev/null && break; sleep 1; done
+          curl -sf localhost:8181/api/v3/pet/1 | grep '"id": 1'
+          docker logs ms
+          docker stop ms

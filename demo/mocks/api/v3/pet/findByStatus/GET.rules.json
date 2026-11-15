@@ -1,0 +1,23 @@
+[
+    {
+        "match": { "query": { "status": "sold" } },
+        "body": [
+            { "id": 3, "name": "Rex", "category": { "id": 1, "name": "Dogs" }, "photoUrls": [], "tags": [], "status": "sold" }
+        ]
+    },
+    {
+        "match": { "query": { "status": "pending" } },
+        "body": [
+            { "id": 7, "name": "Tom", "category": { "id": 2, "name": "Cats" }, "photoUrls": [], "tags": [], "status": "pending" }
+        ]
+    },
+    {
+        "match": { "query": { "status": "available" } },
+        "file": "GET.json"
+    },
+    {
+        "match": { "query": { "status": { "$exists": true } } },
+        "status": 400,
+        "body": { "code": 400, "message": "Invalid status value '{{query.status}}'" }
+    }
+]

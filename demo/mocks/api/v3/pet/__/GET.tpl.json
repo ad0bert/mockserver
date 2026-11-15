@@ -1,0 +1,18 @@
+{
+    "id": {{path.3}},
+    "name": "doggie",
+    "category": {
+        "id": 1,
+        "name": "Dogs"
+    },
+    "photoUrls": [
+        "https://example.com/photos/{{path.3}}.jpg"
+    ],
+    "tags": [
+        {
+            "id": 1,
+            "name": "friendly"
+        }
+    ],
+    "status": "available"
+}
